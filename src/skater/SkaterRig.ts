@@ -148,8 +148,26 @@ export function lerpJoints(out: RagdollJoints, a: RagdollJoints, b: RagdollJoint
  * Repère local : X à droite, Y en haut, -Z vers l'avant ; origine au contact du sol, entre les trucks.
  * Une version glTF implémentera la même interface avec un AnimationMixer.
  */
+/** Motif du dessous du board. */
+export type DeckPattern = 'plain' | 'stripes' | 'split' | 'dots' | 'chevron' | 'checker';
+
+/** Apparence personnalisable du skateur (couleurs en hexadécimal 0xRRGGBB). */
+export interface SkaterAppearance {
+  /** Couleur principale du dessous du board. */
+  deck: number;
+  /** Couleur du motif. */
+  accent: number;
+  pattern: DeckPattern;
+  wheel: number;
+  shirt: number;
+  pants: number;
+  cap: number;
+}
+
 export interface SkaterRig {
   readonly root: THREE.Object3D;
+  /** Applique couleurs et motif (personnalisation). */
+  setAppearance(appearance: SkaterAppearance): void;
   /** Appelé à chaque frame rendue avec la pose interpolée. */
   update(pose: SkaterPose, dt: number): void;
   /** Écrit les articulations de la pose affichée (monde), pour lancer un ragdoll sans saut visuel. */

@@ -108,6 +108,8 @@ export class FlickRecognizer {
   lastPathLength = 0;
   /** Dernière analyse, conservée pour l'affichage. */
   lastEvent: FlickEvent | null = null;
+  /** Sensibilité courante (réglages), FLICK.sensitivity par défaut : multiplie toutes les tolérances. */
+  sensitivity: number = FLICK.sensitivity;
 
   private phase: Phase = 'idle';
   private readonly path = new Float32Array(MAX_SAMPLES * 2);
@@ -278,7 +280,7 @@ export class FlickRecognizer {
     f.amplitude = maxR;
     f.endAngle = Math.atan2(p[endIndex * 2 + 1]!, p[endIndex * 2]!);
 
-    const s = FLICK.sensitivity;
+    const s = this.sensitivity;
     const arcness = sigmoid((minR - FLICK.arcRadius) / (FLICK.arcRadiusWidth * s));
     const startFit = gauss(angleDistance(f.startAngle, DOWN), FLICK.startTolerance * s);
     const candidates: TrickCandidate[] = TEMPLATES.map((t) => {

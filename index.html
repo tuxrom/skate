@@ -11,10 +11,23 @@
       body { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
       #app { position: fixed; inset: 0; }
       #app canvas { display: block; width: 100%; height: 100%; }
+      #loading { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; background: #14161a; color: #f2f2f2; font: 600 14px/1.4 system-ui, sans-serif; transition: opacity 0.35s; }
+      #loading.done { opacity: 0; pointer-events: none; }
+      #loading h1 { margin: 0; font: 900 52px/1 system-ui, sans-serif; letter-spacing: 0.04em; }
+      #loading h1 span { color: #f4d35e; }
+      #loading .bar { width: min(260px, 70vw); height: 6px; border-radius: 3px; background: rgba(255,255,255,0.15); overflow: hidden; }
+      #loading .bar div { height: 100%; width: 5%; background: #f4d35e; transition: width 0.25s; }
+      #loading .msg { opacity: 0.7; }
     </style>
   </head>
   <body>
     <div id="app"></div>
+    <div id="loading" role="status" aria-live="polite">
+      <h1>Ska<span>te</span></h1>
+      <div class="bar"><div></div></div>
+      <div class="msg">Chargement…</div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

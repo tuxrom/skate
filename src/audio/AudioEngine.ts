@@ -8,9 +8,12 @@ import { playBoardClatter, playBodyImpact, playLand, playPop } from './sfx';
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  /** Coupé pendant la pause. */
   private muted = false;
+  /** Coupé dans les réglages. */
+  private userMuted = false;
 
-  constructor(private readonly volume = 0.8) {
+  constructor(private volume = 0.8) {
     const unlock = () => {
       this.ensureContext();
       void this.ctx?.resume();
@@ -30,9 +33,37 @@ export class AudioEngine {
     return this.master;
   }
 
+  /** Coupe le son pendant la pause (indépendant du réglage). */
   setMuted(muted: boolean): void {
     this.muted = muted;
-    if (this.master) this.master.gain.value = muted ? 0 : this.volume;
+    this.applyGain();
+  }
+
+  /** Réglages : volume général (0 à 1) et son coupé. */
+  setVolume(volume: number, userMuted: boolean): void {
+    this.volume = Math.max(0, Math.min(1, volume));
+    this.userMuted = userMuted;
+    this.applyGain();
+  }
+
+  /** Son d'interface (menus), joué même en pause, au volume réglé. */
+  uiClick(): void {
+    if (this.userMuted || this.volume <= 0) return;
+    const wasMuted = this.muted;
+    if (wasMuted) {
+      this.muted = false;
+      this.applyGain();
+    }
+    this.blip(880, 0.05);
+    if (wasMuted) {
+      this.muted = true;
+      // Le bip est très court : on rend la coupure de pause juste après.
+      setTimeout(() => this.applyGain(), 90);
+    }
+  }
+
+  private applyGain(): void {
+    if (this.master) this.master.gain.value = this.muted || this.userMuted ? 0 : this.volume;
   }
 
   /** Claquement du tail au pop. */
@@ -77,7 +108,7 @@ export class AudioEngine {
     if (this.ctx) return;
     this.ctx = new AudioContext({ latencyHint: 'interactive' });
     this.master = this.ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : this.volume;
+    this.master.gain.value = this.muted || this.userMuted ? 0 : this.volume;
     this.master.connect(this.ctx.destination);
   }
 

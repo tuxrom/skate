@@ -10,7 +10,7 @@ import { ProceduralSkaterRig } from '@/skater/ProceduralSkaterRig';
  * Pour passer aux modèles : écrire une GltfAssets qui implémente AssetProvider
  * (GLTFLoader + preload()), puis la passer à Game à la place de ProceduralAssets.
  */
-export type AssetId = 'ground' | 'box' | 'prism' | 'rail';
+export type AssetId = 'ground' | 'box' | 'prism' | 'rail' | 'marker';
 
 /** Aspect de surface d'un élément de décor. */
 export type Finish = 'ground' | 'park' | 'wall' | 'metal';
@@ -29,6 +29,8 @@ export interface AssetParams {
   length?: number;
   radius?: number;
   finish?: Finish;
+  /** Couleur d'un repère 'marker' (0xRRGGBB). */
+  color?: number;
 }
 
 export interface AssetProvider {
@@ -60,6 +62,7 @@ export class ProceduralAssets implements AssetProvider {
   }
 
   create(id: AssetId, params: AssetParams = {}): THREE.Object3D {
+    if (id === 'marker') return this.createMarker(params.radius ?? 3, params.color ?? 0xf4d35e);
     const fallback: Finish = id === 'ground' ? 'ground' : id === 'rail' ? 'metal' : 'park';
     const material = this.materials.get(params.finish ?? fallback)!;
     let geometry: THREE.BufferGeometry;
@@ -93,6 +96,25 @@ export class ProceduralAssets implements AssetProvider {
     mesh.castShadow = id !== 'ground';
     mesh.name = id;
     return mesh;
+  }
+
+  /**
+   * Repère de zone : anneau au sol et colonne lumineuse au centre, visibles de loin, sans ombre.
+   * Chaque repère a ses matériaux, pour changer sa couleur seul (MeshBasicMaterial.color).
+   */
+  private createMarker(radius: number, color: number): THREE.Object3D {
+    const group = new THREE.Group();
+    group.name = 'marker';
+    const ringMat = this.track(new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide }));
+    const ring = new THREE.Mesh(this.track(new THREE.RingGeometry(radius - 0.18, radius, 72).rotateX(-Math.PI / 2)), ringMat);
+    ring.position.y = 0.03;
+    ring.renderOrder = 1;
+    const pillarMat = this.track(new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.22, depthWrite: false }));
+    const pillar = new THREE.Mesh(this.track(new THREE.CylinderGeometry(0.12, 0.12, 5, 12, 1, true)), pillarMat);
+    pillar.position.y = 2.5;
+    pillar.renderOrder = 1;
+    group.add(ring, pillar);
+    return group;
   }
 
   createSkater(): SkaterRig {

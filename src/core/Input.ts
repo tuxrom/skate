@@ -25,6 +25,11 @@ export interface InputSnapshot {
   grab: { x: number; y: number };
   /** Équilibre du manual, -1 à 1 (vers l'avant positif) : flèches haut/bas avec la touche de manual, stick gauche avec LB/RB. */
   manualAxis: number;
+  /**
+   * Choix du grind à l'accrochage, ajouté au stick gauche avant/arrière : -1 = 5-0 (LB / L1),
+   * +1 = nosegrind ou lipslide (RB / R1), 0 = 50-50 ou boardslide.
+   */
+  grindSelect: number;
   /** Boutons maintenus. */
   held: ReadonlySet<ButtonAction>;
   /** Boutons pressés depuis le pas fixe précédent. */
@@ -43,6 +48,7 @@ export interface MutableSnapshot {
   flick: { x: number; y: number };
   grab: { x: number; y: number };
   manualAxis: number;
+  grindSelect: number;
   held: Set<ButtonAction>;
 }
 
@@ -178,6 +184,8 @@ export class MouseFlickSource implements InputSource {
   private grabOriginX = 0;
   private grabOriginY = 0;
   private readonly grabStick = { x: 0, y: 0 };
+  /** Sensibilité (réglages) : un glissé de mouseStickRadiusPx / sensitivity met le stick en butée. */
+  sensitivity = 1;
 
   constructor(private readonly element: HTMLElement) {
     element.addEventListener('pointerdown', this.onDown);
@@ -216,12 +224,12 @@ export class MouseFlickSource implements InputSource {
       const gx = e.clientX - this.grabOriginX;
       const gy = e.clientY - this.grabOriginY;
       const gl = Math.hypot(gx, gy) || 1;
-      const gr = Math.min(1, gl / INPUT.mouseStickRadiusPx);
+      const gr = Math.min(1, gl / (INPUT.mouseStickRadiusPx / this.sensitivity));
       this.grabStick.x = (gx / gl) * gr;
       this.grabStick.y = (-gy / gl) * gr;
     }
     if (!this.active) return;
-    const radius = INPUT.mouseStickRadiusPx;
+    const radius = INPUT.mouseStickRadiusPx / this.sensitivity;
     let dx = e.clientX - this.originX;
     let dy = e.clientY - this.originY;
     const len = Math.hypot(dx, dy);
@@ -290,15 +298,29 @@ const PAD_BUTTONS: ReadonlyArray<readonly [number, ButtonAction]> = [
   [9, 'pause'], // Start / Options
 ];
 
+/** Disposition des boutons, pour les libellés (les indices du mapping standard sont les mêmes). */
+export type PadFamily = 'xbox' | 'playstation';
+
+/** Reconnaît une manette PlayStation à son identifiant (nom ou identifiant de fabricant Sony 054c). */
+export function detectPadFamily(id: string): PadFamily {
+  return /054c|playstation|dualshock|dualsense|sony/i.test(id) ? 'playstation' : 'xbox';
+}
+
 /**
- * Manette : stick gauche pour la direction, stick droit pour le flick (ollie : bas puis haut).
+ * Manette (Gamepad API, mapping standard, dispositions Xbox et PlayStation) : stick gauche pour la direction,
+ * stick droit pour le flick (ollie : bas puis haut), gâchettes LT/RT (L2/R2) pour les grabs (le stick droit
+ * choisit le grab), gâchettes hautes LB/RB (L1/R1) pour le manual et le choix du grind (LB 5-0, RB nosegrind).
  * Lit toutes les manettes branchées ; la zone morte est appliquée par Input.
  */
 export class GamepadSource implements InputSource {
+  /** Identifiant de la dernière manette active, pour adapter les libellés. */
+  lastPadId = '';
+
   sample(s: MutableSnapshot): void {
     if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
     for (const pad of navigator.getGamepads()) {
       if (!pad || !pad.connected || pad.axes.length < 4) continue;
+      if (pad.id !== this.lastPadId && pad.buttons.some((b) => b.pressed)) this.lastPadId = pad.id;
       s.move.x = clampUnit(s.move.x + (pad.axes[0] ?? 0));
       s.move.y = clampUnit(s.move.y - (pad.axes[1] ?? 0));
       // Gâchette de grab tenue : le stick droit choisit le grab au lieu de flicker.
@@ -309,6 +331,7 @@ export class GamepadSource implements InputSource {
       for (const [index, action] of PAD_BUTTONS) if (pad.buttons[index]?.pressed) s.held.add(action);
       // Gâchette haute de manual tenue : le stick gauche avant/arrière règle l'équilibre.
       if (pad.buttons[4]?.pressed || pad.buttons[5]?.pressed) s.manualAxis = clampUnit(s.manualAxis - (pad.axes[1] ?? 0));
+      s.grindSelect = clampUnit(s.grindSelect + (pad.buttons[5]?.pressed ? 1 : 0) - (pad.buttons[4]?.pressed ? 1 : 0));
     }
   }
 
@@ -320,16 +343,28 @@ export class Input {
   readonly flickRecognizer = new FlickRecognizer();
   private readonly sources: InputSource[] = [];
   private readonly previousHeld = new Set<ButtonAction>();
-  private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, grab: { x: 0, y: 0 }, manualAxis: 0, held: new Set() };
+  private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, grab: { x: 0, y: 0 }, manualAxis: 0, grindSelect: 0, held: new Set() };
+  /** Boutons ignorés jusqu'à leur relâchement (tenus à la fermeture d'un menu). */
+  private readonly masked = new Set<ButtonAction>();
+  private maskNext = false;
   private readonly snapshot: InputSnapshot = {
     move: { x: 0, y: 0 },
     flick: { x: 0, y: 0 },
     gesture: this.flickRecognizer.snapshot,
     grab: { x: 0, y: 0 },
     manualAxis: 0,
+    grindSelect: 0,
     held: new Set(),
     pressed: new Set(),
   };
+
+  /**
+   * Ignore les boutons tenus au prochain pas jusqu'à ce qu'ils soient relâchés : la touche ou le bouton
+   * qui ferme un menu (Espace, A) ne déclenche pas d'action en jeu.
+   */
+  suppressHeld(): void {
+    this.maskNext = true;
+  }
 
   addSource(source: InputSource): void {
     this.sources.push(source);
@@ -338,9 +373,17 @@ export class Input {
   /** À appeler une fois au début de chaque pas fixe. */
   poll(): InputSnapshot {
     const b = this.building;
-    b.move.x = b.move.y = b.flick.x = b.flick.y = b.grab.x = b.grab.y = b.manualAxis = 0;
+    b.move.x = b.move.y = b.flick.x = b.flick.y = b.grab.x = b.grab.y = b.manualAxis = b.grindSelect = 0;
     b.held.clear();
     for (const src of this.sources) src.sample(b);
+    if (this.maskNext) {
+      this.maskNext = false;
+      for (const a of b.held) if (a !== 'pause' && a !== 'debug') this.masked.add(a);
+    }
+    for (const a of this.masked) {
+      if (b.held.has(a)) b.held.delete(a);
+      else this.masked.delete(a);
+    }
 
     const pressed = this.snapshot.pressed as Set<ButtonAction>;
     pressed.clear();
@@ -350,6 +393,7 @@ export class Input {
     applyStick(b.flick, this.snapshot.flick);
     applyStick(b.grab, this.snapshot.grab);
     this.snapshot.manualAxis = b.manualAxis;
+    this.snapshot.grindSelect = b.grindSelect;
     this.flickRecognizer.update(this.snapshot.flick.x, this.snapshot.flick.y);
     const held = this.snapshot.held as Set<ButtonAction>;
     held.clear();

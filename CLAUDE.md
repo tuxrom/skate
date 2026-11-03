@@ -33,9 +33,11 @@ En mode debug, `window.__skate` expose le jeu : `debugState()` (état du skateur
 | Espace maintenu puis relâché | | Ollie : la durée de charge règle la hauteur |
 | E tenu (+ flèche), ou clic droit tenu (+ glissé) | LT / RT tenue (+ stick droit) | Grab, tant que c'est tenu : haut = nosegrab, bas = tailgrab, droite = indy, gauche = melon, sans direction = indy |
 | Ctrl tenu (ou C), équilibre avec ↑ / ↓ | LB / RB tenue, équilibre au stick gauche | Manual au sol ; ↑ tenu à l'entrée = nose manual |
+| S / Z (W) tenu à l'accrochage | LB tenue = 5-0, RB tenue = nosegrind / lipslide | Choix du grind |
 | Shift | A / Croix | Pousser ; maintenir enchaîne des poussées plus fortes (accélérer) |
-| R | Select | Pendant une chute : se relever tout de suite. Sinon : retour au départ |
-| Échap | Start | Pause |
+| R | Select (View / Share) | Pendant une chute : se relever tout de suite. Sinon : retour au départ |
+| Échap | Start (Menu / Options) | Pause ; dans les menus, retour |
+| Flèches, Entrée, Espace | Croix ou stick gauche, A / Croix, B / Rond | Navigation dans les menus |
 | F3 ou ² | | Panneau de debug |
 
 Les touches sont liées par code physique (`KeyboardEvent.code`), donc ZQSD et WASD sont la même rangée. À la souris, un glissé de `INPUT.mouseStickRadiusPx` met le stick en butée ; relâcher le bouton ramène le stick au centre et termine le geste. Aux flèches, le stick virtuel glisse vers la direction tenue (`INPUT.keyStickResponse`) et longe le bord entre deux flèches voisines (`keyStickArcMaxAngle`) : une suite ↓ ↙ ← ↖ ↑ trace un demi-cercle.
@@ -92,12 +94,22 @@ src/
     Game.ts             assemble les sous-systèmes, fixedUpdate / render
     GameLoop.ts         boucle à pas fixe avec accumulateur et stats
     Renderer.ts         WebGLRenderer, pixel ratio plafonné, resize
+    EventBus.ts         bus d'événements typé (charges réutilisées, à copier pour les garder)
     Input.ts            actions abstraites, sources d'input enfichables (clavier, souris, manette)
     FlickRecognizer.ts  analyse du geste du stick droit, événement de trick normalisé
     CameraRig.ts        caméra troisième personne : amortissement, FOV selon la vitesse, collision, anticipation de réception
   physics/
     PhysicsWorld.ts     chargement WASM, monde Rapier, colliders statiques et matériaux, rayons
     InterpolatedBody.ts interpolation d'une PoseSource (corps Rapier, skateur) vers un Object3D
+  score/
+    ScoreSystem.ts      combos : éléments, multiplicateur, variété, répétition, validation ou annulation, bus d'événements
+  progress/
+    Profile.ts          profil en mémoire : niveau et XP, défis, records, réglages, personnalisation, écriture différée
+    ChallengeSystem.ts  objectifs de zone : présence dans les zones, progression, chronos, réussite
+    unlocks.ts          catalogue des boards et couleurs, conditions de déblocage, apparence du skateur
+  save/
+    SaveStore.ts        stockage IndexedDB avec repli localStorage, reprise des anciens records
+    SaveData.ts         format de sauvegarde, valeurs par défaut, validation, niveau selon l'XP
   skater/
     Skater.ts           simulation : intégration, suivi du sol, obstacles, ollie, prédiction, évaluation de réception
     skaterStates.ts     états idle, pushing, riding, braking, popCharge, pop, air, landing, grind, manual, bail
@@ -117,11 +129,16 @@ src/
     assets.ts           AssetProvider et son implémentation procédurale
     textures.ts         textures générées par code
     DustEffect.ts       poussière d'impact : pool fixe de points, shader de fondu
+    challenges.ts       zones et défis du skatepark de test (données de niveau)
+    ZoneMarkers.ts      repères des zones au sol (anneau et colonne), couleur selon l'état
   ui/
     DebugOverlay.ts     FPS, temps de frame, pas physiques, draw calls, état du skateur
-    PauseOverlay.ts     voile de pause
     FlickDebugPanel.ts  debug du flick : stick, chemin du geste, mesures, trick et scores
     BalanceMeter.ts     jauge d'équilibre des grinds et manuals
+    Hud.ts              HUD : combo, nom du trick, validation et annulation animées, vitesse, niveau, objectifs, notifications
+    Menus.ts            accueil, pause, réglages, personnalisation, objectifs, aide ; navigation clavier et manette
+    helpContent.ts      schémas SVG des gestes, tables de contrôles, libellés Xbox / PlayStation
+    styles.ts           feuille de style du HUD et des menus
   audio/
     AudioEngine.ts      contexte Web Audio déverrouillé au premier geste, bus master
     sfx.ts              sons synthétisés : pop du tail, claque de réception, chocs du corps et de la planche
@@ -163,6 +180,13 @@ src/
 - **Modules de skatepark** : un profil 2D extrudé donne le visuel, sa décomposition convexe donne les colliders (`ColliderDesc.convexHull`). Les colonnes adjacentes partagent leurs arêtes exactement, ce qui évite les accrocs aux raccords.
 - **Caméra** : les requêtes de collision passent par un callback fourni par `Game`, `CameraRig` ne dépend pas de Rapier. Rapprochement immédiat quand le décor bouche la vue, recul amorti ; un départ déjà au contact d'un mur ne bloque pas le balayage. Pendant une chute, elle suit le bassin du ragdoll sans avance du point visé, puis revient derrière le skateur. En l'air, le suivi vertical se relâche et glisse vers l'altitude de réception prévue (`CAMERA.landingLead`, `landingAnticipation`) ; à l'impact, affaissement proportionnel à la vitesse.
 - **Animation** : `SkaterPose` porte des temps (`popTime`, `landTime`, `airTime`) plutôt que des angles ; chaque rig en tire ses propres courbes. Le rig procédural fait pivoter la planche autour des roues arrière (nose qui se lève puis nivelage), applique les rotations de trick autour du centre du deck (shove sur l'axe vertical, puis flip sur l'axe long) et place les pieds sur le deck par IK, décollés pendant la rotation (`feetLift`). En grind et en manual (`BALANCE_POSES`), le board se cabre sur la paire de roues qui porte (5-0, manual) ou pique du nose (nosegrind, nose manual, avec compensation de hauteur), et le buste suit la jauge. Pour un grab, le board remonte vers la main, le buste se penche et tourne vers la zone de prise, et le bras qui attrape est placé par IK (`GRAB_POSES`).
+- **Score et combos** (`ScoreSystem`, barème dans `SCORING`) : branché par `Game` sur les événements du skateur (`land`, `grindEntry`, `balanceStart` / `balanceEnd`, `bail`), avancé à pas fixe après `Skater.step`. Un élément est un saut (popé et assez long, ou avec rotation ou grab), un grind ou un manual (durée minimale). Le combo dure tant que le temps au sol hors manual reste sous `comboGroundTime` ; le compteur repart à chaque élément et se suspend en l'air, en grind et en manual. Score = (Σ points + bonus de variété par famille) × multiplicateur (éléments distincts). Points d'un élément = (base + hauteur, distance de grind/manual, transition grind ↔ manual) × facteur de répétition (`repeatDecay` dans le combo, `recentRepeatFactor` sur les combos validés récents). Validation à l'échéance après une réception propre, immédiate et réduite (`sloppyLandingFactor`) sur une réception sale. Rien n'est acquis avant : une chute (réception, grind, manual, mur, même pendant le délai au sol) ou un retour au départ annule tout. `score.events` (`EventBus<ScoreEvents>`) publie `comboStart`, `element`, `liveStart`, `comboBanked`, `comboLost`, `record` pour l'UI et les objectifs. Total et meilleur combo de session en mémoire ; records dans le localStorage (`skate.scores.v1`) via `ScoreStore`, qui tolère un stockage indisponible. Un vol qui finit sur un rail est signalé par `grindEntry` et remet `popped` à faux : la réception après la sortie ne recompte pas le trick.
+- **Modes et menus** : `Game.mode` vaut `home` (accueil, simulation figée, caméra en orbite) ou `play`. Un menu ouvert met la simulation en pause. `Menus` gère une pile d'écrans ; Échap / Start passent par l'action `pause` d'`Input` et appellent `menus.back()`. La navigation à la manette lit `navigator.getGamepads` dans le rendu. À la fermeture d'un menu, `Input.suppressHeld()` ignore les boutons encore tenus (Espace, A) jusqu'à leur relâchement. En personnalisation, la caméra passe devant le skateur (`HUD.showcase*`).
+- **HUD** (`Hud`) : écoute `score.events`, `challenges.events` et `profile.events` ; écrit le DOM seulement sur changement, animations en CSS (`styles.ts`). La jauge d'équilibre (`BalanceMeter`) lui appartient.
+- **Profil et sauvegarde** : `main.ts` ouvre `SaveStore` (IndexedDB `skate` / `save` / `profile`, repli localStorage `skate.save.v1`, reprise unique de l'ancienne clé `skate.scores.v1`), puis `Profile.load` valide les données (`sanitizeSave`). `Profile` sert de `RecordsStore` au score et de `ChallengeStore` aux défis ; chaque modification est écrite après 400 ms, et tout de suite quand la page se cache. Les réglages et l'apparence sont appliqués par `Game` sur les événements `settings` et `custom`.
+- **Progression** : XP = points des combos validés × `PROGRESSION.xpPerPoint` + récompenses des défis ; niveau par paliers croissants (`levelBaseXp`, `levelGrowth`). Boards et couleurs se débloquent par niveau, certains boards par un défi (`unlocks.ts`).
+- **Défis de zone** (`ChallengeSystem`) : zones circulaires (`world/challenges.ts`), suivies par masque de bits à chaque pas. Types : combo validé avec un élément dans la zone, grind ou manual d'une longueur ou durée, saut d'une famille (flip, rotation...), chrono lancé en entrant dans la zone (points ou nombre d'éléments). Progression maximale gardée, réussite unique.
+- **Qualité graphique** (`QUALITY_PRESETS`) : bas, moyen, haut ; appliquée à chaud par `Renderer.setQuality` (pixel ratio, ombres, recompilation des matériaux) et `Level.setQuality` (brouillard, shadow map). La distance de rendu de la caméra suit le brouillard. L'antialiasing reste celui du démarrage. Par défaut : moyen sur écran tactile, haut sinon.
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
 ## Conventions de code
@@ -187,8 +211,8 @@ src/
 - [x] 4. Grabs : indy, melon, nosegrab, tailgrab à E, au clic droit ou à la gâchette ; rotations 180, 360, 540 avec aimantation ; enchaînement flip, grab et rotation dans un même saut ; caméra et poussée en fakie
 - [x] 5. Grinds et manuals : lignes de grind explicites, 50-50, 5-0, nosegrind, boardslide, lipslide, manual et nose manual, jauge d'équilibre, sorties par ollie ou flip, transitions grind ↔ manual ; parc : six rails, ledge continu, boîte de manual
 - [x] 6. Bails : déclencheurs (réception, équilibre, mur, obstacle bas), ragdoll Rapier à rotules lancé depuis la pose affichée, planche indépendante, relève sur un point dégagé avec fondu, R pour se relever, caméra sur le corps, sons d'impact
-- [ ] 7. Score et combos
-- [ ] 8. HUD, menus, sauvegarde
+- [x] 7. Score et combos : valeur de base par trick, combos prolongés par grinds et manuals, délai au sol configurable, multiplicateur par éléments distincts, bonus de variété, de hauteur, de distance et de transition grind ↔ manual, pénalité de répétition, validation sur réception propre, annulation totale sur chute, bus d'événements typé, meilleur score de session et records en localStorage
+- [x] 8. HUD, menus, sauvegarde : HUD (combo, nom du trick, validation et annulation animées, jauge, vitesse, niveau, objectifs, notifications), écran de chargement, menus responsive (accueil, pause, réglages, personnalisation, objectifs, aide illustrée), qualité graphique réelle, défis de zone, niveau et déblocages, sauvegarde IndexedDB avec repli localStorage, manette Xbox / PlayStation dans le jeu et les menus
 - [ ] 9. Contrôles tactiles
 - [ ] 10. PWA (icônes PNG, écran d'installation, stratégie de cache, mode hors ligne vérifié)
 - [ ] 11. Optimisation (découpage du bundle, le WASM inline de Rapier pèse lourd ; profilage mobile)

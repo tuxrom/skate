@@ -87,6 +87,68 @@ export function createCheckerTexture(a = '#e8b23a', b = '#2b2d31', cells = 4, si
   return tex;
 }
 
+/** Motif du dessous d'un board (repris de SkaterRig pour ne pas dépendre du skateur). */
+export type DeckGraphic = 'plain' | 'stripes' | 'split' | 'dots' | 'chevron' | 'checker';
+
+/**
+ * Dessous de board : couleur de fond et motif dans une couleur d'accent.
+ * Le canvas est en portrait : sa hauteur suit la longueur du board.
+ */
+export function createDeckTexture(pattern: DeckGraphic, base: number, accent: number): THREE.CanvasTexture {
+  const w = 64;
+  const h = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D indisponible');
+  const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
+  ctx.fillStyle = hex(base);
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = hex(accent);
+  ctx.strokeStyle = hex(accent);
+  switch (pattern) {
+    case 'plain':
+      break;
+    case 'stripes':
+      for (let y = 16; y < h; y += 40) ctx.fillRect(0, y, w, 14);
+      break;
+    case 'split':
+      ctx.beginPath();
+      ctx.moveTo(0, h * 0.35);
+      ctx.lineTo(w, h * 0.65);
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'dots':
+      for (let y = 12; y < h; y += 24) for (let x = (y / 24) % 2 === 0 ? 12 : 24; x < w; x += 24) {
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 'chevron':
+      ctx.lineWidth = 9;
+      for (let y = 10; y < h + 32; y += 34) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w / 2, y - 22);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+      break;
+    case 'checker':
+      for (let y = 0; y < h; y += 16) for (let x = (y / 16) % 2 === 0 ? 0 : 16; x < w; x += 32) ctx.fillRect(x, y, 16, 16);
+      break;
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 function clamp8(v: number): number {
   return v < 0 ? 0 : v > 255 ? 255 : v;
 }

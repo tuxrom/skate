@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { BODY, POP } from '@/config/physics';
-import type { RagdollJoints, SkaterPose, SkaterRig } from './SkaterRig';
+import type { RagdollJoints, SkaterAppearance, SkaterPose, SkaterRig } from './SkaterRig';
+import { createDeckTexture } from '@/world/textures';
 import { GRAB_DEFS, GRAB_ORDER, type GrabId } from './tricks';
 import { BALANCE_ORDER } from './grinds';
 import type { BalanceMoveId } from '@/config/physics';
@@ -190,6 +191,10 @@ export class ProceduralSkaterRig implements SkaterRig {
   private readonly armDir = new THREE.Vector3();
   private readonly armBend = new THREE.Vector3();
 
+  /** Matériaux recolorés par la personnalisation. */
+  private readonly paint: Record<'graphic' | 'deck' | 'wheel' | 'shirt' | 'pants' | 'cap', THREE.MeshStandardMaterial>;
+  private deckTexture: THREE.CanvasTexture | null = null;
+
   constructor() {
     this.root.name = 'skater';
     const m = {
@@ -202,6 +207,14 @@ export class ProceduralSkaterRig implements SkaterRig {
       skin: this.track(new THREE.MeshStandardMaterial({ color: 0xd9a37a, roughness: 0.75 })),
       shoe: this.track(new THREE.MeshStandardMaterial({ color: 0x1f1f22, roughness: 0.8 })),
       cap: this.track(new THREE.MeshStandardMaterial({ color: 0x2c6e91, roughness: 0.8 })),
+    };
+    this.paint = {
+      graphic: this.track(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 })),
+      deck: this.track(new THREE.MeshStandardMaterial({ color: 0xb5835a, roughness: 0.6 })),
+      wheel: m.wheel,
+      shirt: m.shirt,
+      pants: m.pants,
+      cap: m.cap,
     };
 
     this.root.add(this.roll);
@@ -261,12 +274,14 @@ export class ProceduralSkaterRig implements SkaterRig {
 
   private buildBoard(m: Record<'wood' | 'grip' | 'metal' | 'wheel', THREE.Material>): void {
     const flatLength = BODY.boardLength - 2 * KICK_LENGTH;
-    const deckMaterials = [m.wood, m.wood, m.grip, m.wood, m.wood, m.wood];
+    // Faces px, nx, py, ny, pz, nz : le dessus est le grip, le dessous (ny) porte le motif du board.
+    const deckMaterials = [m.wood, m.wood, m.grip, this.paint.graphic, m.wood, m.wood];
+    const kickMaterials = [m.wood, m.wood, m.grip, this.paint.deck, m.wood, m.wood];
     const deck = this.addMesh(this.track(new THREE.BoxGeometry(BODY.boardWidth, DECK_THICKNESS, flatLength)), deckMaterials, this.board);
     deck.position.y = DECK_BOTTOM + DECK_THICKNESS / 2;
     const kickGeo = this.track(new THREE.BoxGeometry(BODY.boardWidth, DECK_THICKNESS, KICK_LENGTH).translate(0, 0, -KICK_LENGTH / 2));
     for (const sign of [-1, 1]) {
-      const kick = this.addMesh(kickGeo, deckMaterials, this.board);
+      const kick = this.addMesh(kickGeo, kickMaterials, this.board);
       kick.position.set(0, DECK_BOTTOM + DECK_THICKNESS / 2, (sign * flatLength) / 2);
       kick.rotation.x = sign < 0 ? KICK_ANGLE : -KICK_ANGLE;
       if (sign > 0) kick.rotation.y = Math.PI;
@@ -606,9 +621,23 @@ export class ProceduralSkaterRig implements SkaterRig {
     return d;
   }
 
+  setAppearance(a: SkaterAppearance): void {
+    this.deckTexture?.dispose();
+    this.deckTexture = createDeckTexture(a.pattern, a.deck, a.accent);
+    this.paint.graphic.map = this.deckTexture;
+    this.paint.graphic.needsUpdate = true;
+    this.paint.deck.color.setHex(a.deck);
+    this.paint.wheel.color.setHex(a.wheel);
+    this.paint.shirt.color.setHex(a.shirt);
+    this.paint.pants.color.setHex(a.pants);
+    this.paint.cap.color.setHex(a.cap);
+  }
+
   dispose(): void {
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
+    this.deckTexture?.dispose();
+    this.deckTexture = null;
     this.root.removeFromParent();
   }
 }

@@ -36,7 +36,26 @@ const RAIL_BELOW_SEARCH = 2.5;
 /** Qualité d'une réception. 'bail' dépasse les seuils de chute ; les chutes arrivent à l'étape 6. */
 export type LandingQuality = 'clean' | 'sloppy' | 'bail';
 
-export interface LandingInfo {
+/** Bilan d'un vol, qu'il finisse au sol (réception) ou sur une ligne de grind (accrochage). */
+export interface AirMoveInfo {
+  airTime: number;
+  /** Hauteur max atteinte au-dessus du point de décollage (m). */
+  peakHeight: number;
+  /** Vrai si le vol a commencé par un pop. */
+  popped: boolean;
+  /** Trick du vol ('ollie' sans pop). */
+  trick: TrickId;
+  /** Sens du geste du trick (+1, -1, 0), qui distingue backside et frontside. */
+  trickSide: number;
+  /** Rotation du corps comptée, en degrés (0, 180, 360, 540...). */
+  spinDegrees: number;
+  /** Grabs tenus assez longtemps pendant le vol, dans l'ordre. */
+  readonly grabs: GrabId[];
+  /** Nom complet du saut, par exemple « 360 Kickflip Indy ». */
+  label: string;
+}
+
+export interface LandingInfo extends AirMoveInfo {
   quality: LandingQuality;
   /** Vitesse le long de la normale au moment de l'impact (m/s). */
   impactSpeed: number;
@@ -44,25 +63,12 @@ export interface LandingInfo {
   tilt: number;
   /** Écart entre l'axe de la planche et la vitesse (rad), fakie compris. */
   yawError: number;
-  airTime: number;
-  /** Hauteur max atteinte au-dessus du point de décollage (m). */
-  peakHeight: number;
-  /** Vrai si le vol a commencé par un pop. */
-  popped: boolean;
-  /** Trick du vol. */
-  trick: TrickId;
   /** Rotation de board qui restait à faire au contact (rad). */
   boardResidual: number;
-  /** Rotation du corps comptée, en degrés (0, 180, 360, 540...). */
-  spinDegrees: number;
   /** Écart entre la rotation finale et le multiple de 180° le plus proche (rad). */
   spinError: number;
-  /** Grabs tenus assez longtemps pendant le vol, dans l'ordre. */
-  readonly grabs: GrabId[];
   /** Prise encore présente au contact (0 à 1). */
   grabAtContact: number;
-  /** Nom complet du saut, par exemple « 360 Kickflip Indy ». */
-  label: string;
   readonly position: THREE.Vector3;
   readonly normal: THREE.Vector3;
 }
@@ -84,6 +90,8 @@ export type BalanceEndReason = 'end' | 'pop' | 'slow' | 'bail' | 'blocked' | 're
 
 export interface SkaterEvents {
   pop?(charge: number, position: THREE.Vector3, trick: ActiveTrick): void;
+  /** Accrochage d'une ligne de grind en l'air : bilan du vol qui y mène, émis juste avant balanceStart. */
+  grindEntry?(air: AirMoveInfo): void;
   /** Début d'un grind ou d'un manual. */
   balanceStart?(move: BalanceMoveId): void;
   /** Fin d'un grind ou d'un manual : durée (s) et distance parcourue (m), pour les combos. */
@@ -136,6 +144,7 @@ const EMPTY_INPUT: InputSnapshot = {
   gesture: { charging: false, flicking: false, event: null, cancelled: false },
   grab: { x: 0, y: 0 },
   manualAxis: 0,
+  grindSelect: 0,
   held: new Set(),
   pressed: new Set(),
 };
@@ -294,6 +303,7 @@ export class Skater implements PoseSource {
     peakHeight: 0,
     popped: false,
     trick: 'ollie',
+    trickSide: 0,
     boardResidual: 0,
     spinDegrees: 0,
     spinError: 0,
@@ -302,6 +312,17 @@ export class Skater implements PoseSource {
     label: '',
     position: new THREE.Vector3(),
     normal: new THREE.Vector3(0, 1, 0),
+  };
+  /** Bilan du dernier vol terminé sur une ligne de grind. */
+  readonly lastGrindEntry: AirMoveInfo = {
+    airTime: 0,
+    peakHeight: 0,
+    popped: false,
+    trick: 'ollie',
+    trickSide: 0,
+    spinDegrees: 0,
+    grabs: [],
+    label: '',
   };
   readonly prediction: LandingPrediction = {
     valid: false,
@@ -818,7 +839,7 @@ export class Skater implements PoseSource {
     if (fH.lengthSq() < 1e-8) fH.copy(dirH);
     fH.normalize();
     const angle = Math.acos(THREE.MathUtils.clamp(Math.abs(fH.dot(dirH)), 0, 1));
-    const type = chooseGrind(angle <= GRIND.truckMaxAngle, this.input.move.y);
+    const type = chooseGrind(angle <= GRIND.truckMaxAngle, this.input.move.y + this.input.grindSelect);
     g.segment = seg;
     g.t = q.t;
     g.speed = s;
@@ -836,8 +857,28 @@ export class Skater implements PoseSource {
     this.brake = 0;
     this.grabAmount = 0;
     this.grabId = null;
+    if (!this.grindOnGround) this.reportGrindEntry();
+    // Le vol est terminé : le trick est figé et la réception qui suivra la sortie ne le recomptera pas.
+    this.popped = false;
+    if (this.trick.landedProgress < 0) this.trick.landedProgress = trickEase(this.trick.time / this.trick.duration);
     this.startBalance(type);
     this.events.balanceStart?.(type);
+  }
+
+  /** Bilan du vol qui finit sur la ligne (rotation comptée par demi-tours entiers), pour le score. */
+  private reportGrindEntry(): void {
+    const info = this.lastGrindEntry;
+    const halfTurns = Math.floor((Math.abs(this.spinAngle) + SPIN.grindEntryTolerance) / Math.PI);
+    info.airTime = this.airTime;
+    info.peakHeight = Math.max(0, this.peakY - this.takeoffY);
+    info.popped = this.popped;
+    info.trick = this.popped ? this.trick.id : 'ollie';
+    info.trickSide = this.trick.side;
+    info.spinDegrees = halfTurns * 180;
+    info.grabs.length = 0;
+    for (const g of this.grabsThisAir) info.grabs.push(g);
+    info.label = comboName(info.spinDegrees, info.trick, info.trickSide, info.grabs);
+    this.events.grindEntry?.(info);
   }
 
   /**
@@ -1381,13 +1422,14 @@ export class Skater implements PoseSource {
     info.peakHeight = Math.max(0, this.peakY - this.takeoffY);
     info.popped = this.popped;
     info.trick = this.popped ? this.trick.id : 'ollie';
+    info.trickSide = this.trick.side;
     info.boardResidual = residual;
     info.spinError = spinError;
     info.spinDegrees = Math.abs(this.spinAngle) >= SPIN.minCountedAngle ? Math.round(Math.abs(spinTarget) / Math.PI) * 180 : 0;
     info.grabs.length = 0;
     for (const g of this.grabsThisAir) info.grabs.push(g);
     info.grabAtContact = grabAtContact;
-    info.label = comboName(info.spinDegrees, info.trick, this.trick.side, info.grabs);
+    info.label = comboName(info.spinDegrees, info.trick, info.trickSide, info.grabs);
     info.position.copy(this.position);
     info.normal.copy(this.up);
     this.landTime = 0;

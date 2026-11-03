@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { PhysicsWorld } from '@/physics/PhysicsWorld';
 import type { AssetProvider } from './assets';
-import { RENDER } from '@/config/render';
+import { RENDER, type QualityPreset } from '@/config/render';
 import { GrindNetwork } from './GrindNetwork';
 import {
   addBox,
@@ -195,9 +195,25 @@ export class Level {
     ctx.grinds.addLine([a, b], 'coping', 'concrete');
   }
 
+  /** Qualité graphique : distance du brouillard, ombres du soleil et taille de leur shadow map. */
+  setQuality(q: QualityPreset, scene: THREE.Scene): void {
+    if (scene.fog instanceof THREE.Fog) {
+      scene.fog.near = q.fogNear;
+      scene.fog.far = q.fogFar;
+    }
+    this.sun.castShadow = q.shadows;
+    const shadow = this.sun.shadow;
+    if (shadow.mapSize.x !== q.shadowMapSize) {
+      shadow.mapSize.set(q.shadowMapSize, q.shadowMapSize);
+      // La shadow map est recréée à la bonne taille au prochain rendu.
+      shadow.map?.dispose();
+      shadow.map = null;
+    }
+  }
+
   /** Fait suivre la shadow map autour d'un point, calé sur la grille de texels pour éviter le scintillement. */
   followShadow(focus: THREE.Vector3): void {
-    const texel = (RENDER.shadowExtent * 2) / RENDER.shadowMapSize;
+    const texel = (RENDER.shadowExtent * 2) / this.sun.shadow.mapSize.x;
     this.snapped.set(Math.round(focus.x / texel) * texel, Math.round(focus.y / texel) * texel, Math.round(focus.z / texel) * texel);
     this.sun.target.position.copy(this.snapped);
     this.sun.position.copy(this.snapped).add(SUN_OFFSET);

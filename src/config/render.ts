@@ -92,6 +92,53 @@ export const FX = {
   dustOpacity: 0.55,
 } as const;
 
+/** HUD et menus. */
+export const HUD = {
+  /** Durée d'affichage d'un combo validé ou perdu (s). */
+  comboResultTime: 2.2,
+  /** Nombre d'éléments du combo affichés (les plus récents). */
+  comboVisibleElements: 4,
+  /** Durée d'affichage du nom d'un trick avant qu'il s'efface (s). */
+  trickNameTime: 1.3,
+  /** Durée d'une notification (défi réussi, niveau, déblocage) (s). */
+  toastTime: 3.2,
+  /** Rotation de la caméra autour du skateur sur l'écran d'accueil (rad/s). */
+  homeOrbitSpeed: 0.18,
+  /** Caméra de l'écran d'accueil : distance et hauteur (m). */
+  homeOrbitDistance: 4.2,
+  homeOrbitHeight: 1.6,
+  /** Caméra de la personnalisation : devant et à droite du skateur, hauteur (m). */
+  showcaseFront: 2.4,
+  showcaseSide: 1.1,
+  showcaseHeight: 1.15,
+  /** Répétition de la navigation au stick ou à la croix tenus, dans les menus (ms). */
+  menuRepeatMs: 220,
+  /** Seuil du stick pour naviguer dans les menus (0 à 1). */
+  menuStickThreshold: 0.6,
+} as const;
+
+export type GraphicsQuality = 'low' | 'medium' | 'high';
+
+export interface QualityPreset {
+  /** Plafond du devicePixelRatio. */
+  maxPixelRatio: number;
+  /** Échelle de résolution appliquée au pixel ratio (0 à 1). */
+  resolutionScale: number;
+  shadows: boolean;
+  /** Taille de la shadow map (px). */
+  shadowMapSize: number;
+  /** Brouillard linéaire (m) ; la caméra ne dessine pas au-delà de fogFar. */
+  fogNear: number;
+  fogFar: number;
+}
+
+/** Préréglages de qualité graphique (réglages > Graphismes). L'antialiasing reste celui du démarrage. */
+export const QUALITY_PRESETS: Readonly<Record<GraphicsQuality, QualityPreset>> = {
+  low: { maxPixelRatio: 1, resolutionScale: 0.7, shadows: false, shadowMapSize: 512, fogNear: 25, fogFar: 85 },
+  medium: { maxPixelRatio: 1.5, resolutionScale: 1, shadows: true, shadowMapSize: 1024, fogNear: 45, fogFar: 150 },
+  high: { maxPixelRatio: 2, resolutionScale: 1, shadows: true, shadowMapSize: 2048, fogNear: 60, fogFar: 220 },
+};
+
 export const DEBUG = {
   /** Intervalle de rafraîchissement du compteur FPS (s). */
   statsRefresh: 0.5,

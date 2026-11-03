@@ -8,6 +8,8 @@
  * Les valeurs actuelles sont des points de départ à affiner étape par étape.
  */
 
+import type { FlickTrickId } from '@/core/FlickRecognizer';
+
 /** Pas de simulation et garde-fous de la boucle fixe. */
 export const SIMULATION = {
   /** Fréquence de la physique (Hz). */
@@ -284,6 +286,11 @@ export const SPIN = {
   snapContactLead: 0.05,
   /** Rotation minimale pour être comptée et nommée (rad, 150°). */
   minCountedAngle: (150 * Math.PI) / 180,
+  /**
+   * À l'accrochage d'un grind, la rotation est comptée par demi-tours entiers (arrondi inférieur)
+   * avec cette tolérance (rad) : le quart de tour d'un boardslide ne compte pas comme un 180.
+   */
+  grindEntryTolerance: (25 * Math.PI) / 180,
 } as const;
 
 /** Types de grind et de manual. Leurs réglages par type sont indexés par ces identifiants. */
@@ -549,14 +556,108 @@ export const FLICK = {
   minScore: 0.3,
 } as const;
 
-/** Score et combos. */
+/** Niveau du joueur : XP gagnée par les combos validés et les défis. */
+export const PROGRESSION = {
+  /** XP gagnée par point de combo validé. */
+  xpPerPoint: 1,
+  /** XP pour passer du niveau 1 au niveau 2. */
+  levelBaseXp: 1500,
+  /** Facteur appliqué à l'XP requise à chaque niveau. */
+  levelGrowth: 1.3,
+  /** Niveau maximal. */
+  maxLevel: 20,
+} as const;
+
+/** Réglages modifiables dans le menu : bornes et valeurs par défaut. */
+export const SETTINGS_LIMITS = {
+  /** Sensibilité des flicks (multiplie toutes les tolérances de reconnaissance, voir FLICK.sensitivity). */
+  flickSensitivityMin: 0.6,
+  flickSensitivityMax: 1.6,
+  /** Sensibilité de la souris : divise INPUT.mouseStickRadiusPx (plus haut = glissé plus court). */
+  mouseSensitivityMin: 0.5,
+  mouseSensitivityMax: 2,
+} as const;
+
+/**
+ * Score et combos (points entiers, arrondis à la validation).
+ *
+ * Score d'un combo = (Σ points des éléments + bonus de variété) × multiplicateur × facteur de réception.
+ * Points d'un élément = (valeur de base + bonus de hauteur, de distance, de transition) × facteur de répétition.
+ */
 export const SCORING = {
-  /** Délai sans trick après lequel un combo est validé (s). */
-  comboTimeout: 1.2,
-  /** Multiplicateur ajouté par trick dans un combo. */
-  comboMultiplierStep: 1,
-  /** Points par seconde de grind. */
-  grindPointsPerSecond: 120,
-  /** Points par seconde de manual. */
-  manualPointsPerSecond: 80,
+  // Enchaînement.
+  /**
+   * Temps passé au sol (hors manual) qui clôt le combo (s). Le compteur repart à zéro à chaque élément ;
+   * il est suspendu en l'air, en grind et en manual. À l'échéance, le combo est validé.
+   */
+  comboGroundTime: 1.0,
+
+  // Valeurs de base.
+  /** Valeur de base de chaque trick du board (points). Un ollie ne compte que s'il y a eu un pop. */
+  trickPoints: {
+    ollie: 100,
+    kickflip: 300,
+    heelflip: 300,
+    popShoveIt: 250,
+    treFlip: 650,
+    varialFlip: 450,
+    hardflip: 500,
+  } satisfies Record<FlickTrickId, number>,
+  /** Points par demi-tour de rotation du corps (points / 180°). */
+  spinPointsPer180: 200,
+  /** Supplément par demi-tour au-delà du premier (fraction) : un 540 vaut plus que trois 180. */
+  spinExtraPer180: 0.25,
+  /** Points par grab compté. */
+  grabPoints: 150,
+  /** Bonus de hauteur : seuil au-dessus du point de décollage (m)... */
+  heightBonusFrom: 0.4,
+  /** ...et points par mètre au-delà. */
+  heightPointsPerMeter: 400,
+  /** Valeur de base de chaque grind et manual, à l'accrochage (points). */
+  balancePoints: {
+    fiftyFifty: 150,
+    fiveO: 200,
+    nosegrind: 225,
+    boardslide: 200,
+    lipslide: 250,
+    manual: 100,
+    noseManual: 150,
+  } satisfies Record<BalanceMoveId, number>,
+  /** Bonus de distance de grind (points / m). */
+  grindPointsPerMeter: 60,
+  /** Bonus de distance de manual (points / m). */
+  manualPointsPerMeter: 40,
+  /** Durée minimale d'un grind pour compter (s). */
+  minGrindTime: 0.1,
+  /** Durée minimale d'un manual pour compter (s) : un tap de la touche ne gonfle pas le combo. */
+  minManualTime: 0.3,
+  /** Bonus d'un manual enchaîné après un grind, avec au plus un saut entre les deux (points). */
+  grindToManualBonus: 300,
+  /** Bonus d'un grind enchaîné après un manual, avec au plus un saut entre les deux (points). */
+  manualToGrindBonus: 200,
+
+  // Multiplicateur et variété.
+  /** Multiplicateur ajouté par élément distinct au-delà du premier. */
+  multiplierStep: 0.5,
+  /** Plafond du multiplicateur. */
+  maxMultiplier: 8,
+  /**
+   * Bonus de variété par famille distincte au-delà de la première (points) ; familles :
+   * flip, shove, rotation, grab, grind sur trucks, slide, manual.
+   */
+  varietyPointsPerFamily: 150,
+
+  // Répétition.
+  /** Facteur appliqué à chaque répétition d'un même élément dans le combo (puissance du nombre de répétitions). */
+  repeatDecay: 0.5,
+  /** Facteur appliqué par occurrence du même élément dans les combos validés récents. */
+  recentRepeatFactor: 0.8,
+  /** Nombre d'éléments validés récents mémorisés pour la pénalité de répétition entre combos. */
+  recentHistorySize: 10,
+  /** Plancher du facteur de répétition. */
+  minRepeatFactor: 0.1,
+
+  // Validation.
+  /** Facteur appliqué au combo quand il se termine sur une réception sale (0 : rien n'est validé). */
+  sloppyLandingFactor: 0.5,
 } as const;
