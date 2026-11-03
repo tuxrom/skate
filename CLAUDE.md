@@ -28,9 +28,10 @@ En mode debug, `window.__skate` expose le jeu : `debugState()` (état du skateur
 
 | Clavier | Manette | Action |
 | --- | --- | --- |
-| Z Q S D (AZERTY) / W A S D (QWERTY) | Stick gauche | Direction : gauche-droite inclinent la planche (et tournent le corps en l'air), arrière freine, avant groupe |
+| Z Q S D (AZERTY) / W A S D (QWERTY) | Stick gauche | Direction : gauche-droite inclinent la planche, arrière freine, avant groupe. En l'air, gauche-droite font tourner le corps (180, 360, 540) |
 | Glisser bouton gauche maintenu, ou flèches en repli | Stick droit | Pieds du skateur : gestes de flick (tableau ci-dessous) |
 | Espace maintenu puis relâché | | Ollie : la durée de charge règle la hauteur |
+| E tenu (+ flèche), ou clic droit tenu (+ glissé) | LT / RT tenue (+ stick droit) | Grab, tant que c'est tenu : haut = nosegrab, bas = tailgrab, droite = indy, gauche = melon, sans direction = indy |
 | Shift | A / Croix | Pousser ; maintenir enchaîne des poussées plus fortes (accélérer) |
 | R | Select | Retour au départ |
 | Échap | Start | Pause |
@@ -51,6 +52,12 @@ Tout geste commence stick en bas (charge, le skateur s'accroupit ; la durée rè
 | Cercle complet | 360 flip |
 | Arc de 225° par la droite, sortie haut-gauche | Varial flip |
 | Arc de 225° par la gauche, sortie haut-droite | Hardflip |
+
+### En l'air
+
+- **Grabs** : la main part vers la zone du board désignée et y reste tant que le bouton est tenu. Il faut lâcher avant la réception : main encore sur le board au contact, la réception est sale (`GRAB.landSloppyAmount`) ou c'est une chute (`GRAB.landBailAmount`). Pendant un flip, le grab attend que la rotation soit assez avancée (`GRAB.startAfterFlip`).
+- **Rotations** : tenir gauche ou droite fait monter la vitesse de rotation ; relâché, le corps continue sur son élan en ralentissant. Juste avant la réception (`SPIN.snapLead`), l'angle est aimanté vers le multiple de 180° que l'élan atteindrait. Entre deux multiples, l'aimantation ne joue pas : sous-tourner ou sur-tourner donne une réception sale ou une chute. Un grab ralentit la rotation (`GRAB.spinRateMultiplier`).
+- **Repères de timing**, sur un ollie à pleine charge (environ 0,77 s de vol) : D tenu 100 à 200 ms donne un 180, 280 ms et plus un 360 ; un 540 demande un saut plus long (escalier). Un flip et un grab tiennent ensemble sur le plat avec un timing serré, confortablement depuis l'escalier ou le gap.
 
 Un trait coupe le disque intérieur du stick, un arc reste sur le bord : c'est le rayon minimal du chemin qui sépare les deux familles. `FLICK.sensitivity` élargit ou resserre toutes les tolérances.
 
@@ -116,11 +123,15 @@ src/
   - un choc rasant (`GROUND.wallDeflectAngle`) redresse la planche le long du mur.
 - **Ollie** : `popCharge` accumule la charge (linéaire jusqu'à `POP.chargeTime`), `pop` attend `POP.popDelay` puis `performPop` ajoute `√(2·g·h)` le long de la normale du sol, h interpolé entre `POP.minHeight` et `POP.maxHeight`. La vitesse tangentielle est conservée. Coyote time (`INPUT.coyoteMs`) si la planche quitte une arête pendant la charge, buffer (`INPUT.popBufferMs`) pour un tap juste avant la réception.
 - **En l'air** : seule la gravité agit, la vitesse horizontale est conservée exactement. Le corps tourne au stick gauche avec inertie (`POP.airSpinRate`, `POP.airSpinResponse`). La trajectoire balistique est prédite par segments de rayons (`Skater.prediction`) ; la planche s'aligne sur la normale de réception prévue (`POP.airAlignRate`) et la caméra s'en sert.
+- **Grabs** : couche du vol gérée par `Skater.updateGrab` (pas un état de la machine). Direction lue sur un stick dédié, `InputSnapshot.grab` (flèches avec E, glissé du clic droit, stick droit avec une gâchette), séparé du stick de flick pour qu'un tailgrab ne déclenche jamais une charge. Un grab compte après `GRAB.minHold` main sur le board ; les grabs comptés et la prise au contact entrent dans `LandingInfo`.
+- **Rotations du corps** : `Skater.updateSpin` accumule `spinAngle` ; la rotation fait tourner le cap du board et du corps ensemble. L'aimantation projette l'angle sur l'élan restant, verrouille le multiple visé et vise le contact anticipé (`SPIN.snapContactLead`). À la réception, `spinError` (écart au multiple de 180° le plus proche) remplace l'écart à la vitesse quand on est à l'arrêt.
+- **Nom du saut** : `comboName` assemble rotation, trick et grabs (« 180 Kickflip Indy ») dans `LandingInfo.label`.
+- **Fakie** : la poussée agit dans le sens de la marche et le virage suit le sens de la marche. La caméra suit aussi le sens de la marche (vitesse horizontale en l'air), donc elle ne tourne pas avec le skateur pendant une rotation.
 - **Tricks** : `performPop` démarre le trick du dernier `FlickEvent` (`Skater.trick`). La rotation du board dure `TRICKS.rotationAirFraction` du temps de vol prévu, bornée par `minRotationTime` et `maxRotationTime` : plus le saut est haut, plus la rotation est lente. La progression est adoucie (`trickEase`), les pieds quittent le board puis le rattrapent sur `TRICKS.catchFraction`. À la réception, la rotation restante (`boardResidual`) dégrade la qualité au-delà de `TRICKS.landFlipTolerance` (sale) et du double (hors limites), et le board raté reste de travers un instant avant de se recaler.
 - **Réception** : `tryLand` mesure l'angle planche / surface (`tilt`), l'écart entre l'axe de la planche et la vitesse (`yawError`, fakie accepté) et la vitesse d'impact. Qualité `clean`, `sloppy` (seuils `LANDING`) ou `bail` (seuils `BAIL`, en attendant les chutes de l'étape 6), avec perte de vitesse et temps de récupération (état `landing`). Une surface plus inclinée que `GROUND.maxLandingSurfaceAngle` n'accepte jamais de réception. Les effets (son, poussière, affaissement caméra) passent par `Skater.events`.
 - **Modules de skatepark** : un profil 2D extrudé donne le visuel, sa décomposition convexe donne les colliders (`ColliderDesc.convexHull`). Les colonnes adjacentes partagent leurs arêtes exactement, ce qui évite les accrocs aux raccords.
 - **Caméra** : les requêtes de collision passent par un callback fourni par `Game`, `CameraRig` ne dépend pas de Rapier. Rapprochement immédiat quand le décor bouche la vue, recul amorti. En l'air, le suivi vertical se relâche et glisse vers l'altitude de réception prévue (`CAMERA.landingLead`, `landingAnticipation`) ; à l'impact, affaissement proportionnel à la vitesse.
-- **Animation** : `SkaterPose` porte des temps (`popTime`, `landTime`, `airTime`) plutôt que des angles ; chaque rig en tire ses propres courbes. Le rig procédural fait pivoter la planche autour des roues arrière (nose qui se lève puis nivelage), applique les rotations de trick autour du centre du deck (shove sur l'axe vertical, puis flip sur l'axe long) et place les pieds sur le deck par IK, décollés pendant la rotation (`feetLift`).
+- **Animation** : `SkaterPose` porte des temps (`popTime`, `landTime`, `airTime`) plutôt que des angles ; chaque rig en tire ses propres courbes. Le rig procédural fait pivoter la planche autour des roues arrière (nose qui se lève puis nivelage), applique les rotations de trick autour du centre du deck (shove sur l'axe vertical, puis flip sur l'axe long) et place les pieds sur le deck par IK, décollés pendant la rotation (`feetLift`). Pour un grab, le board remonte vers la main, le buste se penche et tourne vers la zone de prise, et le bras qui attrape est placé par IK (`GRAB_POSES`).
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
 ## Conventions de code
@@ -142,7 +153,7 @@ src/
 - [x] 1. Scène, poussée, caméra : skatepark de test, skateur en primitives, machine à états (idle, pousse, roule, freine, air), carve à l'inclinaison, caméra amortie avec collision
 - [x] 2. Ollie : charge et pop, contrôle aérien, prédiction de trajectoire, évaluation de réception, caméra d'anticipation, poussière, sons synthétisés ; parc : marche, petit gap, petit quarter pipe, escalier avec main courante
 - [x] 3. Flicks et flips : stick droit à la souris et aux flèches, reconnaissance de gestes (ollie, kickflip, heelflip, pop shove-it, 360 flip, varial flip, hardflip), rotation du board liée à la hauteur, rattrapage par les pieds, réception évaluée sur la rotation restante, panneau de debug du geste
-- [ ] 4. Grabs
+- [x] 4. Grabs : indy, melon, nosegrab, tailgrab à E, au clic droit ou à la gâchette ; rotations 180, 360, 540 avec aimantation ; enchaînement flip, grab et rotation dans un même saut ; caméra et poussée en fakie
 - [ ] 5. Grinds et manuals
 - [ ] 6. Bails
 - [ ] 7. Score et combos

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { BODY, POP } from '@/config/physics';
 import type { SkaterPose, SkaterRig } from './SkaterRig';
+import { GRAB_DEFS, GRAB_ORDER, type GrabId } from './tricks';
 
 // Gabarit visuel (m). Les dimensions qui comptent pour la physique viennent de BODY.
 const WHEEL_RADIUS = 0.027;
@@ -52,6 +53,38 @@ const FEET_LIFT = 0.2;
 const FEET_SPREAD = 0.05;
 /** Genoux rentrés quand les pieds quittent le board (flexion 0 à 1). */
 const FEET_LIFT_CROUCH = 0.75;
+
+// Grabs (animation seule).
+/** Le board remonte vers la main : genoux ramenés à la poitrine (m). */
+const GRAB_BOARD_LIFT = 0.14;
+/** Hauteur du bassin au-dessus du deck au repos pendant un grab (m). */
+const GRAB_HIP_HEIGHT = 0.5;
+const UPPER_ARM = 0.3;
+const FOREARM = 0.28;
+/** Étirement max des bras pour atteindre la prise (multiplicateur de longueur). */
+const ARM_MAX_STRETCH = 1.2;
+/** Torsion du buste par rad/s de rotation du corps : il mène la rotation. */
+const SPIN_TWIST = 0.03;
+const SPIN_TWIST_MAX = 0.35;
+
+/** Pose de grab : point de prise sur le deck, tangage du board, flexion et torsion du buste (rad). */
+interface GrabPose {
+  x: number;
+  z: number;
+  pitch: number;
+  bend: number;
+  twist: number;
+}
+const GRAB_POSES: Readonly<Record<GrabId, GrabPose>> = {
+  // Main arrière sur le bord côté orteils, entre les pieds.
+  indy: { x: 0.11, z: 0.04, pitch: 0, bend: 0.75, twist: -0.15 },
+  // Main avant sur le bord côté talons : buste penché côté talons (flexion négative).
+  melon: { x: -0.11, z: -0.08, pitch: 0, bend: -1.1, twist: 0.3 },
+  // Main avant sur le nose, nose remonté.
+  nosegrab: { x: 0, z: -0.37, pitch: 0.22, bend: 0.6, twist: 0.6 },
+  // Main arrière sur le tail, tail remonté.
+  tailgrab: { x: 0, z: 0.37, pitch: -0.22, bend: 0.6, twist: -0.6 },
+};
 
 const UP = new THREE.Vector3(0, 1, 0);
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
@@ -105,6 +138,8 @@ export class ProceduralSkaterRig implements SkaterRig {
   private readonly arms: { upper: Limb; lower: Limb; side: number }[] = [];
 
   private wheelAngle = 0;
+  /** Distance restante entre la main et la prise au dernier calcul d'IK (m), pour le debug. */
+  reachError = 0;
   private readonly hip = new THREE.Vector3();
   private readonly hipJoint = new THREE.Vector3();
   private readonly knee = new THREE.Vector3();
@@ -113,6 +148,12 @@ export class ProceduralSkaterRig implements SkaterRig {
   private readonly elbow = new THREE.Vector3();
   private readonly hand = new THREE.Vector3();
   private readonly frontFoot = new THREE.Vector3();
+  private readonly grabTarget = new THREE.Vector3();
+  private readonly ikElbow = new THREE.Vector3();
+  private readonly ikHand = new THREE.Vector3();
+  private readonly torsoInverse = new THREE.Matrix4();
+  private readonly armDir = new THREE.Vector3();
+  private readonly armBend = new THREE.Vector3();
 
   constructor() {
     this.root.name = 'skater';
@@ -208,9 +249,17 @@ export class ProceduralSkaterRig implements SkaterRig {
     const ollie = this.ollieCurves(pose);
     const landing = this.landingCurves(pose);
 
-    // Roulis : inclinaison, plus le déséquilibre d'une réception sale. Tangage : ollie.
+    // Grab : le board remonte vers la main et s'incline pour un nose ou un tail.
+    const grabId = pose.grabIndex >= 0 ? GRAB_ORDER[pose.grabIndex]! : null;
+    const g = grabId ? smooth(pose.grabAmount) : 0;
+    const gp = grabId ? GRAB_POSES[grabId] : null;
+    const boardLift = GRAB_BOARD_LIFT * g;
+    const pitch = ollie.pitch + (gp ? gp.pitch * g : 0);
+
+    // Roulis : inclinaison, plus le déséquilibre d'une réception sale. Tangage : ollie et grab.
     this.roll.rotation.z = -(pose.lean + landing.wobble);
-    this.pitchPivot.rotation.x = ollie.pitch;
+    this.pitchPivot.rotation.x = pitch;
+    this.pitchPivot.position.y = boardLift;
     // Trick : shove autour de l'axe vertical du board, puis flip autour de son axe long (repère du board).
     this.qShove.setFromAxisAngle(AXIS_Y, -pose.trickShove);
     this.qFlip.setFromAxisAngle(AXIS_Z, pose.trickFlip);
@@ -223,18 +272,24 @@ export class ProceduralSkaterRig implements SkaterRig {
     const crouch = Math.max(pose.crouch, pushWeight * 0.45, pose.brake * 0.35, ollie.crouch, landing.crouch, lift * FEET_LIFT_CROUCH);
 
     // Bassin : se baisse et se décale sur le pied avant pendant la poussée, se tend au pop.
-    const hipHeight = lerp(lerp(HIP_HEIGHT_STAND, HIP_HEIGHT_CROUCH, crouch), HIP_HEIGHT_EXTEND, ollie.extend);
+    const baseHip = lerp(lerp(HIP_HEIGHT_STAND, HIP_HEIGHT_CROUCH, crouch), HIP_HEIGHT_EXTEND, ollie.extend);
+    const hipHeight = lerp(baseHip, GRAB_HIP_HEIGHT, g);
     this.hip.set(-0.03 + pushWeight * 0.04, hipHeight, -0.01 - pushWeight * 0.1 + ollie.hipShift);
     this.torso.position.copy(this.hip);
-    this.torso.rotation.set(0, 0, -(pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15 + landing.wobble * 0.8));
+    // Buste : penché vers la zone de prise, tourné vers le nose ou le tail, et en avance sur la rotation du corps.
+    const spinTwist = THREE.MathUtils.clamp(-pose.spinRate * SPIN_TWIST, -SPIN_TWIST_MAX, SPIN_TWIST_MAX);
+    const bend = pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15 + landing.wobble * 0.8 + (gp ? gp.bend * g : 0);
+    this.torso.rotation.set(0, (gp ? gp.twist * g : 0) + spinTwist, -bend);
 
     // Pied avant : sur le deck, il recule pendant la charge puis glisse vers le nose pour niveler.
     // Pendant une rotation, les pieds quittent le deck (vers le haut et un peu vers les extrémités), puis le rattrapent.
-    this.deckPoint(this.frontFoot, FRONT_FOOT.x, FRONT_FOOT.y + lift * FEET_LIFT, ollie.frontZ - lift * FEET_SPREAD, ollie.pitch);
+    this.deckPoint(this.frontFoot, FRONT_FOOT.x, FRONT_FOOT.y + lift * FEET_LIFT, ollie.frontZ - lift * FEET_SPREAD, pitch);
+    this.frontFoot.y += boardLift;
     this.solveLeg(this.frontFoot, -1, this.frontThigh, this.frontShin, this.frontKnee, this.frontShoe);
 
     // Pied arrière : sur le tail pendant l'ollie, au sol pour pousser, ou en frein.
-    this.deckPoint(this.foot, BACK_FOOT.x, BACK_FOOT.y + lift * FEET_LIFT, ollie.backZ + lift * FEET_SPREAD, ollie.pitch);
+    this.deckPoint(this.foot, BACK_FOOT.x, BACK_FOOT.y + lift * FEET_LIFT, ollie.backZ + lift * FEET_SPREAD, pitch);
+    this.foot.y += boardLift;
     if (pushing) {
       const groundY = ANKLE_HEIGHT - DECK_TOP;
       if (contact) {
@@ -254,14 +309,50 @@ export class ProceduralSkaterRig implements SkaterRig {
 
     // Bras : écartés pour l'équilibre, plus en l'air, en virage serré et après une réception sale.
     const balance = Math.min(1, Math.abs(pose.lean) * 2 + (pose.airborne ? 0.6 : 0) + pushWeight * 0.3 + ollie.extend * 0.5 + landing.flail);
+    const grabHand = grabId ? GRAB_DEFS[grabId].hand : 0;
+    if (g > 0 && gp) {
+      // Prise sur le deck remonté, ramenée dans le repère du buste pour l'IK du bras.
+      this.deckPoint(this.grabTarget, gp.x, 0.01, gp.z, pitch);
+      this.grabTarget.y += boardLift;
+      this.torso.updateMatrix();
+      this.torsoInverse.copy(this.torso.matrix).invert();
+      this.grabTarget.applyMatrix4(this.torsoInverse);
+    }
     for (const arm of this.arms) {
       const flail = landing.flail * Math.sin(pose.landTime * 18 + arm.side) * 0.15;
+      const armBalance = arm.side === grabHand ? balance : Math.min(1, balance + g);
       this.shoulder.set(0, 0.5, arm.side * 0.2);
-      this.elbow.set(0.04, 0.26 + balance * 0.08 + flail, arm.side * (0.27 + balance * 0.12));
-      this.hand.set(0.1 - pose.lean * 0.15, 0.06 + balance * 0.18 - flail, arm.side * (0.3 + balance * 0.25));
+      this.elbow.set(0.04, 0.26 + armBalance * 0.08 + flail, arm.side * (0.27 + armBalance * 0.12));
+      this.hand.set(0.1 - pose.lean * 0.15, 0.06 + armBalance * 0.18 - flail, arm.side * (0.3 + armBalance * 0.25));
+      if (arm.side === grabHand && g > 0) {
+        this.solveArm(this.shoulder, this.grabTarget, arm.side);
+        this.elbow.lerp(this.ikElbow, g);
+        this.hand.lerp(this.ikHand, g);
+      }
       arm.upper.set(this.shoulder, this.elbow);
       arm.lower.set(this.elbow, this.hand);
     }
+  }
+
+  /**
+   * IK du bras vers une prise (repère du buste) : coude plié vers l'extérieur et l'arrière.
+   * Hors de portée, le bras s'étire jusqu'à ARM_MAX_STRETCH puis pointe vers la prise.
+   */
+  private solveArm(shoulder: THREE.Vector3, target: THREE.Vector3, side: number): void {
+    const dir = this.armDir.subVectors(target, shoulder);
+    const dist = dir.length();
+    const reach = UPPER_ARM + FOREARM;
+    const stretch = THREE.MathUtils.clamp(dist / reach, 1, ARM_MAX_STRETCH);
+    const a = UPPER_ARM * stretch;
+    const b = FOREARM * stretch;
+    const d = THREE.MathUtils.clamp(dist, 0.05, a + b - 1e-3);
+    this.reachError = Math.max(0, dist - (a + b));
+    dir.divideScalar(dist || 1);
+    const cosA = (a * a + d * d - b * b) / (2 * a * d);
+    const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+    const bendDir = this.armBend.set(-0.4, 0, side).addScaledVector(dir, -(-0.4 * dir.x + side * dir.z)).normalize();
+    this.ikElbow.copy(shoulder).addScaledVector(dir, a * cosA).addScaledVector(bendDir, a * sinA);
+    this.ikHand.copy(shoulder).addScaledVector(dir, d);
   }
 
   /**

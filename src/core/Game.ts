@@ -17,6 +17,9 @@ import { DEBUG, FX } from '@/config/render';
 import { BAIL, WORLD } from '@/config/physics';
 import { DustEffect } from '@/world/DustEffect';
 
+/** Vitesse au-dessus de laquelle le sens de marche oriente la caméra (m/s). */
+const CAMERA_TRAVEL_MIN_SPEED = 0.6;
+
 export interface GameOptions {
   container: HTMLElement;
   rapier: Rapier;
@@ -61,6 +64,8 @@ export class Game {
   private lastTrick = '';
   private lastTrickScore = 0;
   private cameraOverride: THREE.Vector3 | null = null;
+  /** Sens de marche retenu pour la caméra : +1 nose devant, -1 fakie. */
+  private travelSign = 1;
   private lastFlickX = 0;
   private lastFlickY = 0;
   private readonly forwardView = new THREE.Vector3();
@@ -118,6 +123,7 @@ export class Game {
     this.skater.reset(new THREE.Vector3(x, 0, z), new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)));
     this.skaterVisual.teleportSync();
     this.skaterVisual.render(1, 0);
+    this.travelSign = 1;
     this.updateCameraTarget();
     this.cameraRig.snap(this.cameraTarget);
   }
@@ -165,6 +171,15 @@ export class Game {
       gestureEnd: this.input.flickRecognizer.lastEvent?.features.endAngle ?? 0,
       gestureMinR: this.input.flickRecognizer.lastEvent?.features.minRadius ?? 0,
       gestureDuration: this.input.flickRecognizer.lastEvent?.features.duration ?? 0,
+      spinAngle: sk.spinAngle,
+      spinRate: sk.spinRate,
+      grab: sk.grabId ?? '',
+      grabAmount: sk.grabAmount,
+      landLabel: sk.lastLanding.label,
+      landSpin: sk.lastLanding.spinDegrees,
+      landSpinError: sk.lastLanding.spinError,
+      landGrabs: sk.lastLanding.grabs.join(','),
+      landGrabContact: sk.lastLanding.grabAtContact,
       camX: cam.position.x,
       camY: cam.position.y,
       camZ: cam.position.z,
@@ -190,13 +205,14 @@ export class Game {
     this.dust.burst(info.position, info.normal, info.impactSpeed * FX.dustPerImpactSpeed, 0.6 + strength);
     this.pendingImpact = Math.max(this.pendingImpact, info.impactSpeed);
     this.landings++;
-    this.lastLandingText = `${info.quality} ${info.impactSpeed.toFixed(1)} m/s, h ${info.peakHeight.toFixed(2)} m, reste ${info.boardResidual.toFixed(2)} rad`;
+    this.lastLandingText = `${info.label} : ${info.quality}, ${info.impactSpeed.toFixed(1)} m/s, écart ${((info.spinError * 180) / Math.PI).toFixed(0)}°`;
   }
 
   private respawn(): void {
     this.skater.reset(SPAWN.position, SPAWN.forward);
     this.skaterVisual.teleportSync();
     this.skaterVisual.render(1, 0);
+    this.travelSign = 1;
     this.updateCameraTarget();
     this.cameraRig.snap(this.cameraTarget);
   }
@@ -232,11 +248,24 @@ export class Game {
     this.audio.setMuted(paused);
   }
 
+  /**
+   * Cap de la caméra : le sens de la marche, pas celui du board. Au sol, l'axe du board orienté
+   * dans le sens où il roule (fakie compris) ; en l'air, la vitesse horizontale, pour que la caméra
+   * ne tourne pas avec le skateur pendant un 180 ou un 360.
+   */
   private updateCameraTarget(): void {
     const t = this.cameraTarget;
+    const sk = this.skater;
     t.position.copy(this.skaterVisual.object.position);
-    // Le cap affiché suit la pose interpolée, pas l'état brut du pas fixe.
-    t.forward.copy(this.forwardView.set(0, 0, -1).applyQuaternion(this.skaterVisual.object.quaternion));
+    const along = sk.velocity.dot(sk.forward);
+    if (Math.abs(along) > CAMERA_TRAVEL_MIN_SPEED) this.travelSign = along < 0 ? -1 : 1;
+    if (sk.grounded) {
+      // Le cap affiché suit la pose interpolée, pas l'état brut du pas fixe.
+      this.forwardView.set(0, 0, -1).applyQuaternion(this.skaterVisual.object.quaternion).multiplyScalar(this.travelSign);
+      t.forward.copy(this.forwardView);
+    } else if (Math.hypot(sk.velocity.x, sk.velocity.z) > CAMERA_TRAVEL_MIN_SPEED) {
+      t.forward.set(sk.velocity.x, 0, sk.velocity.z).normalize();
+    }
     t.speed = this.skater.speed;
     const p = this.skater.prediction;
     t.airborne = !this.skater.grounded;
@@ -276,6 +305,7 @@ export class Game {
       pos: `${sk.position.x.toFixed(1)} ${sk.position.y.toFixed(2)} ${sk.position.z.toFixed(1)}`,
       charge: sk.charge > 0 ? `${(sk.charge * 100).toFixed(0)} %` : '-',
       trick: this.lastTrickText,
+      air: sk.grounded ? '-' : `rot ${((sk.spinAngle * 180) / Math.PI).toFixed(0)}°  grab ${sk.grabId ?? '-'} ${(sk.grabAmount * 100).toFixed(0)} %`,
       land: this.lastLandingText,
     });
     this.flickPanel.update(this.input.flickRecognizer, this.lastFlickX, this.lastFlickY);

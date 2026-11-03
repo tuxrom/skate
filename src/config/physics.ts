@@ -178,10 +178,6 @@ export const POP = {
   nollieMultiplier: 0.92,
   /** Part de la vitesse tangentielle conservée au décollage. */
   takeoffSpeedRetention: 1.0,
-  /** Vitesse de rotation max du corps en l'air, axe vertical (rad/s). Contrôle volontairement léger. */
-  airSpinRate: 3.2,
-  /** Réponse de la rotation aérienne à l'input (1/s). Plus bas = plus d'inertie. */
-  airSpinResponse: 6,
   /** Alignement automatique de la planche sur la surface de réception prévue (1/s). */
   airAlignRate: 3,
   /** Durée minimale de vol pour qu'un trick soit validé (s). */
@@ -234,15 +230,60 @@ export const TRICKS = {
   maxRotationTime: 0.6,
   /** Dernière fraction de la rotation pendant laquelle les pieds reviennent sur le board (0 à 1). */
   catchFraction: 0.3,
-  /** Temps pour qu'un grab soit tenu et compté (s). */
-  grabMinHold: 0.15,
-  /** Ralentissement de la rotation pendant un grab (multiplicateur). */
-  grabSpinDamping: 0.6,
   /**
    * Rotation de board restant à faire à la réception tolérée sans pénalité (rad).
    * Jusqu'au double, la réception est sale ; au-delà, le board n'est pas sous les pieds.
    */
   landFlipTolerance: 0.45,
+} as const;
+
+/** Grabs. */
+export const GRAB = {
+  /** Temps pour que la main atteigne le board (s). */
+  reachTime: 0.12,
+  /** Temps pour que la main lâche le board et que le corps se redéplie (s). */
+  releaseTime: 0.1,
+  /** Durée de maintien, main sur le board, pour que le grab compte (s). */
+  minHold: 0.1,
+  /**
+   * Progression de la rotation d'un flip à partir de laquelle la main part vers le board (0 à 1).
+   * Avec la rotation adoucie, le board est presque à plat quand la main arrive : le flip reste
+   * visuellement en premier, le grab enchaîne.
+   */
+  startAfterFlip: 0.55,
+  /** Amplitude du stick de grab au-delà de laquelle sa direction choisit le grab (0 à 1). */
+  directionThreshold: 0.45,
+  /** Multiplicateur de la vitesse de rotation max pendant un grab (corps ramassé). */
+  spinRateMultiplier: 0.6,
+  /** Prise encore présente à la réception au-delà de laquelle la réception est sale (0 à 1). */
+  landSloppyAmount: 0.05,
+  /** Prise encore présente à la réception au-delà de laquelle c'est une chute (0 à 1). */
+  landBailAmount: 0.35,
+} as const;
+
+/** Rotations du corps en l'air (180, 360, 540...). */
+export const SPIN = {
+  /** Vitesse de rotation max, stick gauche en butée (rad/s). Un 360 tient dans un ollie haut, un 540 dans un saut d'escalier. */
+  maxRate: 14,
+  /** Montée en vitesse quand le stick est tenu (1/s). */
+  response: 8,
+  /** Perte de vitesse de rotation stick relâché (1/s) : la rotation continue sur son élan. */
+  coastDamping: 3,
+  /** Zone morte du stick gauche pour la rotation (0 à 1). */
+  inputDeadzone: 0.2,
+  /** Fenêtre avant la réception prévue pendant laquelle l'angle est aimanté vers un multiple de 180° (s). */
+  snapLead: 0.35,
+  /** Écart max entre l'angle projeté sur l'élan et le multiple de 180° visé pour que l'aimantation agisse (rad). */
+  snapMaxError: (75 * Math.PI) / 180,
+  /** Réponse de l'aimantation (1/s). */
+  snapResponse: 30,
+  /**
+   * Avance du contact réel sur le point de réception prévu (s) : les sondes touchent le sol
+   * un peu avant. L'aimantation vise ce contact anticipé pour ne pas finir court.
+   */
+  snapContactLead: 0.05,
+  /** Rotation minimale pour être comptée et nommée (rad, 150°). */
+  minCountedAngle: (150 * Math.PI) / 180,
 } as const;
 
 /** Grinds et manuals. */

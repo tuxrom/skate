@@ -95,7 +95,7 @@ const pushing: SkaterState = {
     if (sk.pushTimer < contact) {
       const x = sk.pushTimer / contact;
       const cap = boost ? SKATING.boostSpeedCap : SKATING.pushSpeedCap;
-      const efficiency = Math.max(0, 1 - Math.max(0, sk.forwardSpeed) / cap);
+      const efficiency = Math.max(0, 1 - Math.abs(sk.forwardSpeed) / cap);
       const impulse = SKATING.pushImpulse * (boost ? SKATING.boostImpulseMultiplier : 1);
       const bell = 2 * Math.sin(Math.PI * x) ** 2;
       sk.pushAccel = (impulse * efficiency * bell) / contact;

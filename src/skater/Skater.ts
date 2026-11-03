@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
-import { BAIL, BODY, GROUND, INPUT, LANDING, MATERIALS, POP, SKATING, TRICKS, WORLD, type SurfaceMaterial } from '@/config/physics';
+import { BAIL, BODY, GRAB, GROUND, INPUT, LANDING, MATERIALS, POP, SKATING, SPIN, TRICKS, WORLD, type SurfaceMaterial } from '@/config/physics';
 import type { PhysicsWorld, RayHit } from '@/physics/PhysicsWorld';
 import type { PoseSource } from '@/physics/InterpolatedBody';
 import type { InputSnapshot } from '@/core/Input';
 import type { FlickEvent } from '@/core/FlickRecognizer';
-import { TRICK_DEFS, type TrickId } from './tricks';
+import { GRAB_ORDER, TRICK_DEFS, comboName, grabFromDirection, type GrabId, type TrickId } from './tricks';
 import { StateMachine } from './StateMachine';
 import type { SkaterStateId } from './states';
 import { registerSkaterStates } from './skaterStates';
@@ -44,6 +44,16 @@ export interface LandingInfo {
   trick: TrickId;
   /** Rotation de board qui restait à faire au contact (rad). */
   boardResidual: number;
+  /** Rotation du corps comptée, en degrés (0, 180, 360, 540...). */
+  spinDegrees: number;
+  /** Écart entre la rotation finale et le multiple de 180° le plus proche (rad). */
+  spinError: number;
+  /** Grabs tenus assez longtemps pendant le vol, dans l'ordre. */
+  readonly grabs: GrabId[];
+  /** Prise encore présente au contact (0 à 1). */
+  grabAtContact: number;
+  /** Nom complet du saut, par exemple « 360 Kickflip Indy ». */
+  label: string;
   readonly position: THREE.Vector3;
   readonly normal: THREE.Vector3;
 }
@@ -59,8 +69,10 @@ export interface LandingPrediction {
   valid: boolean;
   readonly point: THREE.Vector3;
   readonly normal: THREE.Vector3;
-  /** Temps avant l'impact (s). */
+  /** Temps avant l'impact (s), mesuré quand la prédiction a été calculée. */
   time: number;
+  /** Temps de vol au moment du calcul (s), pour en déduire le temps restant. */
+  computedAt: number;
 }
 
 type ChargeSource = 'button' | 'stick';
@@ -93,6 +105,7 @@ const EMPTY_INPUT: InputSnapshot = {
   move: { x: 0, y: 0 },
   flick: { x: 0, y: 0 },
   gesture: { charging: false, flicking: false, event: null, cancelled: false },
+  grab: { x: 0, y: 0 },
   held: new Set(),
   pressed: new Set(),
 };
@@ -159,7 +172,24 @@ export class Skater implements PoseSource {
   coyoteCharge = -1;
   /** Instant du dernier appui d'ollie, pour le buffer de réception (s). */
   private lastOllieTap = -Infinity;
-  private airYawRate = 0;
+  // Rotation du corps en l'air.
+  /** Angle de rotation accumulé depuis le décollage (rad), positif vers la droite. */
+  spinAngle = 0;
+  /** Vitesse de rotation (rad/s), positive vers la droite. */
+  spinRate = 0;
+  /** Multiple de 180° visé par l'aimantation, verrouillé une fois choisi (NaN tant qu'aucun). */
+  private spinSnapTarget = Number.NaN;
+
+  // Grab.
+  /** Grab en cours ou en train d'être lâché, null sinon. */
+  grabId: GrabId | null = null;
+  /** Prise de la main sur le board (0 lâché, 1 main sur le board). */
+  grabAmount = 0;
+  /** Temps passé main sur le board pour le grab courant (s). */
+  private grabHold = 0;
+  private grabCounted = false;
+  /** Grabs comptés pendant le vol en cours. */
+  private readonly grabsThisAir: GrabId[] = [];
   /** Geste reconnu en attente du pop. */
   private pendingFlick: FlickEvent | null = null;
   readonly trick: ActiveTrick = { id: 'ollie', side: 0, score: 1, flips: 0, shove: 0, duration: 1, time: 0, landedProgress: 1 };
@@ -183,10 +213,21 @@ export class Skater implements PoseSource {
     popped: false,
     trick: 'ollie',
     boardResidual: 0,
+    spinDegrees: 0,
+    spinError: 0,
+    grabs: [],
+    grabAtContact: 0,
+    label: '',
     position: new THREE.Vector3(),
     normal: new THREE.Vector3(0, 1, 0),
   };
-  readonly prediction: LandingPrediction = { valid: false, point: new THREE.Vector3(), normal: new THREE.Vector3(0, 1, 0), time: 0 };
+  readonly prediction: LandingPrediction = {
+    valid: false,
+    point: new THREE.Vector3(),
+    normal: new THREE.Vector3(0, 1, 0),
+    time: 0,
+    computedAt: 0,
+  };
   events: SkaterEvents = {};
 
   input: InputSnapshot = EMPTY_INPUT;
@@ -242,6 +283,12 @@ export class Skater implements PoseSource {
     return this.velocity.dot(this.forward);
   }
 
+  /** +1 en roulant nose devant, -1 en fakie. Sous 0,3 m/s, le sens du board. */
+  travelSign(): number {
+    const s = this.velocity.dot(this.forward);
+    return s < -0.3 ? -1 : 1;
+  }
+
   get state(): SkaterStateId | null {
     return this.fsm.current;
   }
@@ -264,7 +311,9 @@ export class Skater implements PoseSource {
     this.coyoteCharge = -1;
     this.landTime = -1;
     this.recovery = 0;
-    this.airYawRate = 0;
+    this.resetAirMoves();
+    this.grabAmount = 0;
+    this.grabId = null;
     this.pendingFlick = null;
     this.trick.landedProgress = 1;
     this.trick.flips = this.trick.shove = 0;
@@ -379,7 +428,7 @@ export class Skater implements PoseSource {
     this.airTime = 0;
     this.popped = true;
     this.takeoffY = this.peakY = this.position.y;
-    this.airYawRate = 0;
+    this.resetAirMoves();
     this.charge = 0;
     this.chargeSource = null;
     this.coyoteCharge = -1;
@@ -467,7 +516,8 @@ export class Skater implements PoseSource {
     const speed = v.length();
     const leanN = this.lean / SKATING.leanMax;
     const radius = lerp(SKATING.minTurnRadius, SKATING.highSpeedTurnRadius, clamp01(speed / SKATING.maxSpeed));
-    const carve = (v.dot(f) / radius) * leanN;
+    // Le virage suit le sens de la marche : en fakie, incliner à droite tourne aussi à droite.
+    const carve = (Math.abs(v.dot(f)) / radius) * leanN;
     const pivot = clamp01(1 - speed / SKATING.stationaryTurnBlendSpeed);
     const yawRate = carve * (1 - pivot) + SKATING.stationaryTurnRate * leanN * pivot;
     this.tmpQ.setFromAxisAngle(n, -yawRate * dt);
@@ -477,7 +527,8 @@ export class Skater implements PoseSource {
     // Gravité tangentielle et poussée.
     const tangentGravity = this.tmpA.copy(GRAVITY).addScaledVector(n, -gDotN);
     v.addScaledVector(tangentGravity, dt);
-    v.addScaledVector(f, this.pushAccel * dt);
+    // La poussée agit dans le sens de la marche (vers l'arrière du board en fakie).
+    v.addScaledVector(f, this.pushAccel * this.travelSign() * dt);
 
     // Résistances : roulement, air, frein, survitesse. Elles freinent sans jamais inverser le sens.
     const s = v.length();
@@ -511,15 +562,13 @@ export class Skater implements PoseSource {
     if (this.trick.landedProgress < 0) this.trick.time += dt;
     v.addScaledVector(GRAVITY, dt);
 
-    const target = -this.input.move.x * POP.airSpinRate;
-    this.airYawRate += (target - this.airYawRate) * (1 - Math.exp(-POP.airSpinResponse * dt));
-    this.tmpQ.setFromAxisAngle(this.up, this.airYawRate * dt);
-    this.forward.applyQuaternion(this.tmpQ);
-
     if (--this.predictionCountdown <= 0) {
       this.updatePrediction();
       this.predictionCountdown = POP.predictionInterval;
     }
+    this.updateGrab(dt);
+    this.updateSpin(dt);
+
     const p = this.prediction;
     const alignTo = p.valid && p.normal.dot(WORLD_UP) >= MAX_LANDING_COS_UP ? p.normal : WORLD_UP;
     const k = 1 - Math.exp(-POP.airAlignRate * dt);
@@ -533,6 +582,81 @@ export class Skater implements PoseSource {
     this.resolveBoardObstacles(dt);
     this.moveBody(dt);
     this.tryLand(dt);
+  }
+
+  /**
+   * Rotation du corps : le stick gauche fait monter la vitesse de rotation, relâché elle continue
+   * sur son élan en ralentissant. Dans les SPIN.snapLead dernières secondes avant la réception prévue,
+   * l'angle est aimanté vers le multiple de 180° que la rotation atteindrait sur son élan, s'il en est assez près.
+   */
+  private updateSpin(dt: number): void {
+    const x = this.input.move.x;
+    const maxRate = SPIN.maxRate * (this.grabAmount > 0 ? GRAB.spinRateMultiplier : 1);
+    const steering = Math.abs(x) > SPIN.inputDeadzone;
+    if (steering) {
+      const target = x * maxRate;
+      this.spinRate += (target - this.spinRate) * (1 - Math.exp(-SPIN.response * dt));
+    } else {
+      this.spinRate *= Math.exp(-SPIN.coastDamping * dt);
+    }
+
+    const p = this.prediction;
+    const remaining = p.valid ? p.time - (this.airTime - p.computedAt) : Infinity;
+    if (remaining < SPIN.snapLead) {
+      // Cible : le multiple de 180° que la rotation atteindrait sur son élan, pas le plus proche de l'angle actuel.
+      const coast = SPIN.coastDamping > 0 ? (1 - Math.exp(-SPIN.coastDamping * remaining)) / SPIN.coastDamping : remaining;
+      const projected = this.spinAngle + this.spinRate * coast;
+      // La cible est verrouillée une fois choisie, sauf si le joueur tourne encore : sans ce verrou,
+      // une projection proche de 270° fait hésiter l'aimantation entre 180 et 360.
+      if (Number.isNaN(this.spinSnapTarget) || steering) {
+        const candidate = Math.round(projected / Math.PI) * Math.PI;
+        this.spinSnapTarget = Math.abs(candidate - projected) < SPIN.snapMaxError ? candidate : Number.NaN;
+      }
+      const target = this.spinSnapTarget;
+      const error = target - this.spinAngle;
+      if (!Number.isNaN(target)) {
+        // Vitesse qui fermerait l'écart juste au contact.
+        const desired = error / Math.max(remaining - SPIN.snapContactLead, dt);
+        this.spinRate += (desired - this.spinRate) * (1 - Math.exp(-SPIN.snapResponse * dt));
+      }
+    }
+
+    const step = this.spinRate * dt;
+    this.spinAngle += step;
+    // Rotation vers la droite (sens horaire vu de dessus) pour un angle positif.
+    this.tmpQ.setFromAxisAngle(this.up, -step);
+    this.forward.applyQuaternion(this.tmpQ);
+  }
+
+  /**
+   * Grab : tant que le bouton est tenu, la main va vers la zone du board désignée par le stick de grab,
+   * puis y reste ; relâché, elle revient. Pendant la rotation d'un flip, le grab attend GRAB.startAfterFlip :
+   * le flip a la priorité d'animation, le grab enchaîne.
+   */
+  private updateGrab(dt: number): void {
+    const wants = this.input.held.has('grab');
+    const t = this.trick;
+    const flipping = (t.flips !== 0 || t.shove !== 0) && t.landedProgress < 0 && t.time / t.duration < GRAB.startAfterFlip;
+    if (wants && !flipping) {
+      const dir = grabFromDirection(this.input.grab.x, this.input.grab.y, GRAB.directionThreshold);
+      const next = dir ?? this.grabId ?? 'indy';
+      if (next !== this.grabId) {
+        this.grabId = next;
+        this.grabHold = 0;
+        this.grabCounted = false;
+      }
+      this.grabAmount = Math.min(1, this.grabAmount + dt / GRAB.reachTime);
+    } else {
+      this.grabAmount = Math.max(0, this.grabAmount - dt / GRAB.releaseTime);
+    }
+    if (this.grabAmount >= 1 && this.grabId) {
+      this.grabHold += dt;
+      if (!this.grabCounted && this.grabHold >= GRAB.minHold) {
+        this.grabCounted = true;
+        if (this.grabsThisAir[this.grabsThisAir.length - 1] !== this.grabId) this.grabsThisAir.push(this.grabId);
+      }
+    }
+    if (this.grabAmount === 0) this.grabId = null;
   }
 
   /**
@@ -670,17 +794,29 @@ export class Skater implements PoseSource {
       yawError = Math.acos(THREE.MathUtils.clamp(Math.abs(fT.dot(v)) / tangentSpeed, 0, 1));
     }
 
+    // Rotation du corps : écart au multiple de 180° le plus proche. À l'arrêt, il remplace l'écart
+    // à la vitesse, qui n'est pas mesurable.
+    const spinTarget = Math.round(this.spinAngle / Math.PI) * Math.PI;
+    const spinError = Math.abs(this.spinAngle - spinTarget);
+    if (tangentSpeed <= LANDING.yawCheckMinSpeed) yawError = spinError;
+
     // Une simple descente d'arête sans impact notable n'est pas une réception à évaluer.
     const significant = this.popped || impact >= LANDING.minImpactForRecovery;
     // Board pas encore rattrapé : il reste de la rotation à faire au contact.
     const residual = this.popped ? this.boardResidual() : 0;
+    const grabAtContact = this.grabAmount;
     let quality: LandingQuality = 'clean';
     if (significant) {
       if (tilt > BAIL.maxLandingTilt || yawError > BAIL.maxLandingYawError || impact > BAIL.maxImpactSpeed) quality = 'bail';
       else if (tilt > LANDING.cleanMaxTilt || yawError > LANDING.cleanMaxYawError) quality = 'sloppy';
       if (residual > 2 * TRICKS.landFlipTolerance) quality = 'bail';
       else if (residual > TRICKS.landFlipTolerance && quality === 'clean') quality = 'sloppy';
+      // Main encore sur le board : on ne peut pas recevoir l'impact.
+      if (grabAtContact > GRAB.landBailAmount) quality = 'bail';
+      else if (grabAtContact > GRAB.landSloppyAmount && quality === 'clean') quality = 'sloppy';
     }
+    this.grabAmount = 0;
+    this.grabId = null;
     if (this.trick.landedProgress < 0) this.trick.landedProgress = trickEase(this.trick.time / this.trick.duration);
     const retention =
       quality === 'clean' ? LANDING.cleanSpeedRetention : quality === 'sloppy' ? LANDING.sloppySpeedRetention : LANDING.bailSpeedRetention;
@@ -705,6 +841,12 @@ export class Skater implements PoseSource {
     info.popped = this.popped;
     info.trick = this.popped ? this.trick.id : 'ollie';
     info.boardResidual = residual;
+    info.spinError = spinError;
+    info.spinDegrees = Math.abs(this.spinAngle) >= SPIN.minCountedAngle ? Math.round(Math.abs(spinTarget) / Math.PI) * 180 : 0;
+    info.grabs.length = 0;
+    for (const g of this.grabsThisAir) info.grabs.push(g);
+    info.grabAtContact = grabAtContact;
+    info.label = comboName(info.spinDegrees, info.trick, this.trick.side, info.grabs);
     info.position.copy(this.position);
     info.normal.copy(this.up);
     this.landTime = 0;
@@ -736,6 +878,7 @@ export class Skater implements PoseSource {
           pred.point.set(hit.point.x, hit.point.y, hit.point.z);
           pred.normal.set(hit.normal.x, hit.normal.y, hit.normal.z);
           pred.time = t + (hit.toi / len) * h;
+          pred.computedAt = this.airTime;
           return;
         }
       }
@@ -749,8 +892,18 @@ export class Skater implements PoseSource {
     this.grounded = false;
     this.airTime = 0;
     this.takeoffY = this.peakY = this.position.y;
-    this.airYawRate = 0;
+    this.resetAirMoves();
     this.predictionCountdown = 0;
+  }
+
+  /** Remet à zéro rotation du corps et grabs comptés pour un nouveau vol. */
+  private resetAirMoves(): void {
+    this.spinAngle = 0;
+    this.spinRate = 0;
+    this.spinSnapTarget = Number.NaN;
+    this.grabHold = 0;
+    this.grabCounted = false;
+    this.grabsThisAir.length = 0;
   }
 
   private applyContact(c: GroundContact): void {
@@ -854,6 +1007,9 @@ export class Skater implements PoseSource {
     out.landImpact = this.landTime >= 0 ? clamp01(this.lastLanding.impactSpeed / BAIL.maxImpactSpeed) : 0;
     out.landQuality = this.landTime >= 0 ? (this.lastLanding.quality === 'clean' ? 0 : this.lastLanding.quality === 'sloppy' ? 1 : 2) : 0;
     this.writeTrickPose(out);
+    out.grabIndex = this.grabId ? GRAB_ORDER.indexOf(this.grabId) : -1;
+    out.grabAmount = this.grabAmount;
+    out.spinRate = this.grounded ? 0 : this.spinRate;
   }
 
   /**

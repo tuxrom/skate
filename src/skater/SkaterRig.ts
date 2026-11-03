@@ -33,6 +33,12 @@ export interface SkaterPose {
   feetLift: number;
   /** Progression de la rotation (0 à 1), 1 hors trick. */
   trickProgress: number;
+  /** Grab en cours : indice dans GRAB_ORDER, -1 sans grab. */
+  grabIndex: number;
+  /** Prise de la main sur le board (0 à 1). */
+  grabAmount: number;
+  /** Vitesse de rotation du corps en l'air (rad/s), positive vers la droite. */
+  spinRate: number;
 }
 
 export function createPose(): SkaterPose {
@@ -53,6 +59,9 @@ export function createPose(): SkaterPose {
     trickShove: 0,
     feetLift: 0,
     trickProgress: 1,
+    grabIndex: -1,
+    grabAmount: 0,
+    spinRate: 0,
   };
 }
 
@@ -73,6 +82,9 @@ export function copyPose(out: SkaterPose, src: SkaterPose): void {
   out.trickShove = src.trickShove;
   out.feetLift = src.feetLift;
   out.trickProgress = src.trickProgress;
+  out.grabIndex = src.grabIndex;
+  out.grabAmount = src.grabAmount;
+  out.spinRate = src.spinRate;
 }
 
 /**

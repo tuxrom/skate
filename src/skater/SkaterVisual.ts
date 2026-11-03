@@ -60,6 +60,9 @@ export class SkaterVisual {
     o.trickShove = restart ? b.trickShove : a.trickShove + (b.trickShove - a.trickShove) * alpha;
     o.feetLift = a.feetLift + (b.feetLift - a.feetLift) * alpha;
     o.trickProgress = b.trickProgress;
+    o.grabIndex = b.grabIndex >= 0 ? b.grabIndex : a.grabIndex;
+    o.grabAmount = a.grabAmount + (b.grabAmount - a.grabAmount) * alpha;
+    o.spinRate = b.spinRate;
     this.rig.update(o, dt);
   }
 }

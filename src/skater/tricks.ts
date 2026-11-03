@@ -33,3 +33,43 @@ export function trickName(id: TrickId, side: number): string {
   if (!def.shoveFollowsGesture) return def.name;
   return `${def.name} ${side < 0 ? 'frontside' : 'backside'}`;
 }
+
+/** Grabs, choisis par la direction du stick de grab dans le repère du board. */
+export type GrabId = 'indy' | 'melon' | 'nosegrab' | 'tailgrab';
+
+export interface GrabDef {
+  readonly id: GrabId;
+  readonly name: string;
+  /** Main qui attrape : -1 main avant (côté nose), +1 main arrière (côté tail). */
+  readonly hand: -1 | 1;
+}
+
+export const GRAB_DEFS: Readonly<Record<GrabId, GrabDef>> = {
+  indy: { id: 'indy', name: 'Indy', hand: 1 },
+  melon: { id: 'melon', name: 'Melon', hand: -1 },
+  nosegrab: { id: 'nosegrab', name: 'Nosegrab', hand: -1 },
+  tailgrab: { id: 'tailgrab', name: 'Tailgrab', hand: 1 },
+};
+
+/** Ordre stable des grabs, pour transmettre l'identifiant au rig par un indice. */
+export const GRAB_ORDER: readonly GrabId[] = ['indy', 'melon', 'nosegrab', 'tailgrab'];
+
+/**
+ * Grab désigné par une direction (repère du board, vue de derrière) :
+ * haut = nose, bas = tail, droite = bord côté orteils (indy), gauche = bord côté talons (melon).
+ * Sous le seuil d'amplitude, null : le grab courant est gardé (indy par défaut).
+ */
+export function grabFromDirection(x: number, y: number, threshold: number): GrabId | null {
+  if (Math.hypot(x, y) < threshold) return null;
+  if (Math.abs(y) > Math.abs(x)) return y > 0 ? 'nosegrab' : 'tailgrab';
+  return x > 0 ? 'indy' : 'melon';
+}
+
+/** Nom d'un saut complet : rotation du corps, trick du board, puis grabs, par exemple « 360 Kickflip Indy ». */
+export function comboName(spinDegrees: number, trick: TrickId, trickSide: number, grabs: readonly GrabId[]): string {
+  const parts: string[] = [];
+  if (spinDegrees > 0) parts.push(String(spinDegrees));
+  if (trick !== 'ollie' || (spinDegrees === 0 && grabs.length === 0)) parts.push(trickName(trick, trickSide));
+  for (const g of grabs) parts.push(GRAB_DEFS[g].name);
+  return parts.join(' ');
+}

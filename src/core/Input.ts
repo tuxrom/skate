@@ -5,7 +5,7 @@ import { FlickRecognizer, type GestureSnapshot } from './FlickRecognizer';
  * Actions de jeu abstraites. Le gameplay ne lit jamais une touche directement :
  * il lit des actions, quelle que soit la source (clavier, manette, tactile).
  */
-export type ButtonAction = 'push' | 'ollie' | 'reset' | 'debug' | 'pause';
+export type ButtonAction = 'push' | 'ollie' | 'grab' | 'reset' | 'debug' | 'pause';
 
 export interface InputSnapshot {
   /**
@@ -17,6 +17,12 @@ export interface InputSnapshot {
   flick: { x: number; y: number };
   /** Geste du stick droit analysé par FlickRecognizer, quel que soit le périphérique. */
   gesture: GestureSnapshot;
+  /**
+   * Direction de grab, tenue avec le bouton de grab : haut = nose, bas = tail,
+   * droite = côté orteils, gauche = côté talons. Distincte du stick de flick pour qu'un
+   * tailgrab ne lance jamais une charge d'ollie.
+   */
+  grab: { x: number; y: number };
   /** Boutons maintenus. */
   held: ReadonlySet<ButtonAction>;
   /** Boutons pressés depuis le pas fixe précédent. */
@@ -33,6 +39,7 @@ export interface InputSource {
 export interface MutableSnapshot {
   move: { x: number; y: number };
   flick: { x: number; y: number };
+  grab: { x: number; y: number };
   held: Set<ButtonAction>;
 }
 
@@ -42,6 +49,7 @@ export interface MutableSnapshot {
  */
 const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
   Space: 'ollie',
+  KeyE: 'grab',
   ShiftLeft: 'push',
   ShiftRight: 'push',
   KeyR: 'reset',
@@ -52,6 +60,7 @@ const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
 
 /**
  * Clavier : ZQSD/WASD pour le stick gauche, flèches pour le stick droit en repli.
+ * E tenu fait passer les flèches en direction de grab.
  * Les flèches donnent une cible ; le stick y glisse avec INPUT.keyStickResponse, ce qui
  * transforme une suite de flèches en trajectoire continue (trait ou arc).
  */
@@ -77,6 +86,11 @@ export class KeyboardSource implements InputSource {
     if (len > 1) {
       tx /= len;
       ty /= len;
+    }
+    if (this.down.has('KeyE')) {
+      s.grab.x = clampUnit(s.grab.x + tx);
+      s.grab.y = clampUnit(s.grab.y + ty);
+      tx = ty = 0;
     }
     const k = 1 - Math.exp(-INPUT.keyStickResponse * FIXED_DT);
     const cr = Math.hypot(this.stick.x, this.stick.y);
@@ -140,10 +154,14 @@ export class KeyboardSource implements InputSource {
  */
 export class MouseFlickSource implements InputSource {
   private active = false;
-  private pointerId = -1;
   private originX = 0;
   private originY = 0;
   private readonly stick = { x: 0, y: 0 };
+  /** Bouton droit : grab, la direction du glissé choisit le grab. */
+  private grabbing = false;
+  private grabOriginX = 0;
+  private grabOriginY = 0;
+  private readonly grabStick = { x: 0, y: 0 };
 
   constructor(private readonly element: HTMLElement) {
     element.addEventListener('pointerdown', this.onDown);
@@ -154,24 +172,39 @@ export class MouseFlickSource implements InputSource {
   }
 
   sample(s: MutableSnapshot): void {
+    if (this.grabbing) {
+      s.held.add('grab');
+      s.grab.x = clampUnit(s.grab.x + this.grabStick.x);
+      s.grab.y = clampUnit(s.grab.y + this.grabStick.y);
+    }
     if (!this.active) return;
     s.flick.x = clampUnit(s.flick.x + this.stick.x);
     s.flick.y = clampUnit(s.flick.y + this.stick.y);
   }
 
+  /**
+   * Avec les Pointer Events, un deuxième bouton pressé ou relâché pendant qu'un autre est tenu
+   * arrive en pointermove : on suit donc l'état des boutons (e.buttons) à chaque événement.
+   */
   private readonly onDown = (e: PointerEvent): void => {
-    if (e.pointerType !== 'mouse' || e.button !== 0) return;
-    this.active = true;
-    this.pointerId = e.pointerId;
-    this.originX = e.clientX;
-    this.originY = e.clientY;
-    this.stick.x = this.stick.y = 0;
+    if (e.pointerType !== 'mouse') return;
     this.element.setPointerCapture(e.pointerId);
+    this.syncButtons(e);
     e.preventDefault();
   };
 
   private readonly onMove = (e: PointerEvent): void => {
-    if (!this.active || e.pointerId !== this.pointerId) return;
+    if (e.pointerType !== 'mouse') return;
+    this.syncButtons(e);
+    if (this.grabbing) {
+      const gx = e.clientX - this.grabOriginX;
+      const gy = e.clientY - this.grabOriginY;
+      const gl = Math.hypot(gx, gy) || 1;
+      const gr = Math.min(1, gl / INPUT.mouseStickRadiusPx);
+      this.grabStick.x = (gx / gl) * gr;
+      this.grabStick.y = (-gy / gl) * gr;
+    }
+    if (!this.active) return;
     const radius = INPUT.mouseStickRadiusPx;
     let dx = e.clientX - this.originX;
     let dy = e.clientY - this.originY;
@@ -191,11 +224,33 @@ export class MouseFlickSource implements InputSource {
   };
 
   private readonly onUp = (e: PointerEvent): void => {
-    if (e.pointerId !== this.pointerId) return;
-    this.active = false;
-    this.pointerId = -1;
-    this.stick.x = this.stick.y = 0;
+    if (e.pointerType !== 'mouse') return;
+    this.syncButtons(e);
   };
+
+  /** Démarre ou arrête flick (bouton gauche) et grab (bouton droit) selon les boutons tenus. */
+  private syncButtons(e: PointerEvent): void {
+    const left = (e.buttons & 1) !== 0;
+    const right = (e.buttons & 2) !== 0;
+    if (left && !this.active) {
+      this.active = true;
+      this.originX = e.clientX;
+      this.originY = e.clientY;
+      this.stick.x = this.stick.y = 0;
+    } else if (!left && this.active) {
+      this.active = false;
+      this.stick.x = this.stick.y = 0;
+    }
+    if (right && !this.grabbing) {
+      this.grabbing = true;
+      this.grabOriginX = e.clientX;
+      this.grabOriginY = e.clientY;
+      this.grabStick.x = this.grabStick.y = 0;
+    } else if (!right && this.grabbing) {
+      this.grabbing = false;
+      this.grabStick.x = this.grabStick.y = 0;
+    }
+  }
 
   private readonly onContextMenu = (e: Event): void => e.preventDefault();
 
@@ -211,6 +266,8 @@ export class MouseFlickSource implements InputSource {
 /** Boutons de la disposition standard des manettes (Gamepad API, mapping « standard »). */
 const PAD_BUTTONS: ReadonlyArray<readonly [number, ButtonAction]> = [
   [0, 'push'], // A / Croix
+  [6, 'grab'], // LT / L2
+  [7, 'grab'], // RT / R2
   [8, 'reset'], // Select / Share
   [9, 'pause'], // Start / Options
 ];
@@ -226,8 +283,11 @@ export class GamepadSource implements InputSource {
       if (!pad || !pad.connected || pad.axes.length < 4) continue;
       s.move.x = clampUnit(s.move.x + (pad.axes[0] ?? 0));
       s.move.y = clampUnit(s.move.y - (pad.axes[1] ?? 0));
-      s.flick.x = clampUnit(s.flick.x + (pad.axes[2] ?? 0));
-      s.flick.y = clampUnit(s.flick.y - (pad.axes[3] ?? 0));
+      // Gâchette de grab tenue : le stick droit choisit le grab au lieu de flicker.
+      const grabbing = !!(pad.buttons[6]?.pressed || pad.buttons[7]?.pressed);
+      const target = grabbing ? s.grab : s.flick;
+      target.x = clampUnit(target.x + (pad.axes[2] ?? 0));
+      target.y = clampUnit(target.y - (pad.axes[3] ?? 0));
       for (const [index, action] of PAD_BUTTONS) if (pad.buttons[index]?.pressed) s.held.add(action);
     }
   }
@@ -240,11 +300,12 @@ export class Input {
   readonly flickRecognizer = new FlickRecognizer();
   private readonly sources: InputSource[] = [];
   private readonly previousHeld = new Set<ButtonAction>();
-  private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, held: new Set() };
+  private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, grab: { x: 0, y: 0 }, held: new Set() };
   private readonly snapshot: InputSnapshot = {
     move: { x: 0, y: 0 },
     flick: { x: 0, y: 0 },
     gesture: this.flickRecognizer.snapshot,
+    grab: { x: 0, y: 0 },
     held: new Set(),
     pressed: new Set(),
   };
@@ -256,7 +317,7 @@ export class Input {
   /** À appeler une fois au début de chaque pas fixe. */
   poll(): InputSnapshot {
     const b = this.building;
-    b.move.x = b.move.y = b.flick.x = b.flick.y = 0;
+    b.move.x = b.move.y = b.flick.x = b.flick.y = b.grab.x = b.grab.y = 0;
     b.held.clear();
     for (const src of this.sources) src.sample(b);
 
@@ -266,6 +327,7 @@ export class Input {
 
     applyStick(b.move, this.snapshot.move);
     applyStick(b.flick, this.snapshot.flick);
+    applyStick(b.grab, this.snapshot.grab);
     this.flickRecognizer.update(this.snapshot.flick.x, this.snapshot.flick.y);
     const held = this.snapshot.held as Set<ButtonAction>;
     held.clear();
