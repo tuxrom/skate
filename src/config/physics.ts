@@ -38,7 +38,11 @@ export interface MaterialFeel {
   friction: number;
   /** Restitution transmise à Rapier. */
   restitution: number;
-  /** Décélération de roulement (m/s² opposée à la vitesse). */
+  /**
+   * Coefficient de résistance au roulement (sans unité).
+   * Décélération = coefficient × composante normale de la gravité.
+   * Ordre de grandeur réel pour des roues de skate : 0,01 à 0,03 sur surface dure.
+   */
   rollingResistance: number;
   /** Multiplicateur appliqué à la vitesse max sur cette surface. */
   speedMultiplier: number;
@@ -47,53 +51,116 @@ export interface MaterialFeel {
 }
 
 export const MATERIALS: Readonly<Record<SurfaceMaterial, MaterialFeel>> = {
-  concrete: { friction: 0.9, restitution: 0.0, rollingResistance: 0.35, speedMultiplier: 1.0, grindFriction: 1.2 },
-  asphalt: { friction: 1.0, restitution: 0.0, rollingResistance: 0.6, speedMultiplier: 0.9, grindFriction: 1.6 },
-  wood: { friction: 0.8, restitution: 0.05, rollingResistance: 0.25, speedMultiplier: 1.05, grindFriction: 1.0 },
-  metal: { friction: 0.5, restitution: 0.02, rollingResistance: 0.2, speedMultiplier: 1.05, grindFriction: 0.5 },
-  grass: { friction: 1.2, restitution: 0.0, rollingResistance: 6.0, speedMultiplier: 0.3, grindFriction: 4.0 },
+  concrete: { friction: 0.9, restitution: 0.0, rollingResistance: 0.018, speedMultiplier: 1.0, grindFriction: 1.2 },
+  asphalt: { friction: 1.0, restitution: 0.0, rollingResistance: 0.03, speedMultiplier: 0.9, grindFriction: 1.6 },
+  wood: { friction: 0.8, restitution: 0.05, rollingResistance: 0.012, speedMultiplier: 1.05, grindFriction: 1.0 },
+  metal: { friction: 0.5, restitution: 0.02, rollingResistance: 0.01, speedMultiplier: 1.05, grindFriction: 0.5 },
+  grass: { friction: 1.2, restitution: 0.0, rollingResistance: 0.45, speedMultiplier: 0.3, grindFriction: 4.0 },
 };
 
 /** Gabarit physique du skateur et de la planche. */
 export const BODY = {
-  /** Masse totale skateur + planche (kg). */
-  mass: 75,
-  /** Rayon de la capsule du corps (m). */
-  capsuleRadius: 0.25,
-  /** Demi-hauteur du segment cylindrique de la capsule (m). */
-  capsuleHalfHeight: 0.6,
   /** Longueur de la planche (m). */
   boardLength: 0.8,
   /** Largeur de la planche (m). */
   boardWidth: 0.21,
-  /** Distance du raycast de détection du sol sous les roues (m). */
-  groundProbeDistance: 0.15,
-  /** Pente maximale considérée comme roulable (rad). */
-  maxRollableSlope: 1.2,
+  /** Entraxe des trucks, distance entre les deux sondes de sol (m). */
+  wheelbase: 0.38,
+  /** Rayon de la capsule du corps, utilisée contre les obstacles hauts (m). */
+  capsuleRadius: 0.24,
+  /** Demi-hauteur du segment cylindrique de la capsule (m). */
+  capsuleHalfHeight: 0.5,
+  /**
+   * Espace entre le point de contact des roues et le bas de la capsule (m).
+   * Les obstacles plus bas sont gérés par les rayons de la planche.
+   */
+  capsuleClearance: 0.3,
+  /** Marge de contact du contrôleur cinématique Rapier (m). */
+  collisionSkin: 0.015,
 } as const;
 
-/** Poussée, vitesse et freinage. */
+/** Suivi du sol, transitions et collisions de la planche. */
+export const GROUND = {
+  /** Hauteur de départ des sondes de sol au-dessus du contact (m). */
+  probeHeight: 0.35,
+  /** Distance sous le contact où le sol est encore « rattrapé » (m). Absorbe les joints, pas plus. */
+  snapDistance: 0.05,
+  /**
+   * Vitesse d'éloignement du nouveau plan tolérée sur une arête convexe (m/s).
+   * Au-delà, la planche décolle au lieu d'être collée à la pente.
+   */
+  convexLaunchSpeed: 0.45,
+  /** Écart d'angle max entre deux normales de sol successives pour une transition roulable (rad). */
+  maxTransitionAngle: 0.9,
+  /** Perte de vitesse sur une transition, proportionnelle à (1 - cos Δangle). */
+  transitionSpeedLoss: 0.5,
+  /** Angle à partir duquel une surface touchée est un mur et non une pente (rad, relatif à la normale du sol). */
+  wallAngle: 1.0,
+  /** Hauteur des rayons d'obstacle de la planche au-dessus du contact (m). Plus bas, l'obstacle est enjambé. */
+  wallRayHeight: 0.035,
+  /** Part de la vitesse tangentielle conservée en frottant un mur. */
+  wallSpeedRetention: 0.92,
+  /** Rebond sur un mur (part de la vitesse normale renvoyée). */
+  wallBounce: 0.15,
+  /**
+   * Angle d'incidence max pour lequel un mur redresse la planche le long de sa surface (rad).
+   * Au-delà, le choc est frontal et la planche garde son cap.
+   */
+  wallDeflectAngle: 0.6,
+  /** Lissage de l'orientation visuelle vers la normale du sol (1/s). */
+  upSmoothing: 22,
+  /** Retour de la planche vers la verticale en l'air (1/s). */
+  airUprightRate: 1.5,
+  /** Angle max entre la planche et la surface pour se réceptionner (rad). */
+  maxLandingAngle: 1.0,
+} as const;
+
+/** Poussée, vitesse, virage et freinage. */
 export const SKATING = {
-  /** Impulsion de vitesse ajoutée par poussée (m/s). */
-  pushImpulse: 2.2,
-  /** Durée d'une poussée, pendant laquelle une nouvelle poussée est ignorée (s). */
-  pushDuration: 0.55,
-  /** Vitesse au-delà de laquelle la poussée n'ajoute plus rien (m/s). */
-  pushSpeedCap: 9.0,
-  /** Vitesse maximale absolue au sol (m/s). */
-  maxSpeed: 16.0,
-  /** Décélération du frein au pied (m/s²). */
-  brakeDecel: 6.0,
-  /** Décélération du powerslide (m/s²). */
-  powerslideDecel: 9.0,
-  /** Vitesse angulaire de virage à basse vitesse (rad/s). */
-  turnRateLow: 2.6,
-  /** Vitesse angulaire de virage à vitesse max (rad/s). */
-  turnRateHigh: 1.1,
+  /** Vitesse gagnée par une poussée complète à l'arrêt (m/s). */
+  pushImpulse: 1.9,
+  /** Durée du contact du pied avec le sol pendant une poussée (s). L'accélération y suit une courbe en cloche. */
+  pushDuration: 0.42,
+  /** Temps de retour du pied sur la planche avant la poussée suivante (s). */
+  pushRecovery: 0.28,
+  /** Vitesse au-delà de laquelle une poussée n'apporte plus rien (m/s). Son efficacité décroît linéairement jusque-là. */
+  pushSpeedCap: 7.5,
+  /** Multiplicateur d'impulsion avec Shift (accélérer). */
+  boostImpulseMultiplier: 1.35,
+  /** Multiplicateur de cadence avec Shift (durées divisées par ce facteur). */
+  boostCadenceMultiplier: 1.3,
+  /** Plafond de poussée avec Shift (m/s). */
+  boostSpeedCap: 9.5,
+  /** Vitesse maximale au sol (m/s), atteignable en descente. */
+  maxSpeed: 15,
+  /** Décélération supplémentaire au-delà de maxSpeed (m/s²). */
+  overSpeedDecel: 5,
+  /** Coefficient de traînée aérodynamique (1/m). Décélération = coeff × v². */
+  airDrag: 0.0045,
+  /** Multiplicateur de traînée en position groupée (avant). */
+  tuckDragMultiplier: 0.55,
+  /** Décélération du frein au pied à pleine force (m/s²). */
+  brakeDecel: 5.5,
+  /** Temps pour atteindre la pleine force de freinage (s). */
+  brakeRampTime: 0.18,
+  /** Vitesse sous laquelle la planche s'immobilise si la pente ne l'entraîne pas (m/s). */
+  stopSpeed: 0.12,
+  /** Inclinaison max de la planche (rad). */
+  leanMax: 0.3,
+  /** Vitesse de réponse de l'inclinaison (1/s). */
+  leanResponse: 9,
+  /** Rayon de braquage à pleine inclinaison, à basse vitesse (m). */
+  minTurnRadius: 1.4,
+  /** Rayon de braquage à pleine inclinaison, à maxSpeed (m). */
+  highSpeedTurnRadius: 6,
+  /** Rotation sur place à l'arrêt, pleine inclinaison (rad/s). */
+  stationaryTurnRate: 1.6,
+  /** Vitesse sous laquelle la rotation sur place prend le relais du carve (m/s). */
+  stationaryTurnBlendSpeed: 1.2,
   /** Accélération latérale max avant dérapage (m/s²). */
-  maxLateralGrip: 14.0,
-  /** Vitesse sous laquelle le skateur est considéré à l'arrêt (m/s). */
-  stopSpeed: 0.15,
+  maxLateralGrip: 14,
+  /** Rotation de cap en l'air à pleine inclinaison (rad/s). */
+  airTurnRate: 1.2,
 } as const;
 
 /** Ollie, nollie et contrôle aérien. */
@@ -180,6 +247,12 @@ export const INPUT = {
   manualWindowMs: 150,
   /** Délai entre deux appuis pour un double tap de poussée (ms). */
   doubleTapMs: 250,
+  /** Seuil du stick vers l'arrière pour freiner (0 à 1). */
+  brakeThreshold: 0.5,
+  /** Seuil du stick vers l'avant pour se grouper (0 à 1). */
+  tuckThreshold: 0.5,
+  /** Mémorisation d'une poussée demandée pendant la récupération du pied (ms). */
+  pushBufferMs: 200,
   /** Vitesse de lissage du stick virtuel tactile (1/s). */
   touchStickSmoothing: 18,
 } as const;

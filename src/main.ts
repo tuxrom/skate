@@ -2,6 +2,13 @@ import { Game } from '@/core/Game';
 import { loadRapier } from '@/physics/PhysicsWorld';
 import { ProceduralAssets } from '@/world/assets';
 
+declare global {
+  interface Window {
+    /** Accès au jeu en mode debug (console, tests automatisés). */
+    __skate?: Game;
+  }
+}
+
 async function boot(): Promise<void> {
   const container = document.getElementById('app');
   if (!container) throw new Error('#app introuvable');
@@ -14,6 +21,7 @@ async function boot(): Promise<void> {
 
   const game = new Game({ container, rapier, assets, debug });
   game.start();
+  if (debug) window.__skate = game;
 
   if (import.meta.env.PROD) {
     const { registerSW } = await import('virtual:pwa-register');

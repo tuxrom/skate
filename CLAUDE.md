@@ -22,6 +22,21 @@ Jeu de skateboard 3D en vue troisième personne, inspiré de la série Skate d'E
 
 En production, ajouter `?debug` à l'URL pour afficher le panneau de debug. `F3` ou `²`/`` ` `` le bascule à tout moment.
 
+En mode debug, `window.__skate` expose le jeu : `debugState()` (état du skateur et de la caméra) et `debugTeleport(x, z, yaw)`. Les tests automatisés Playwright s'appuient dessus.
+
+## Contrôles (clavier, étape 1)
+
+| Touche | Action |
+| --- | --- |
+| Z Q S D (AZERTY) / W A S D (QWERTY) / flèches | Direction : gauche-droite inclinent la planche, arrière freine, avant groupe (moins de traînée) |
+| Espace | Pousser (maintenir pour enchaîner) |
+| Shift | Accélérer : poussées enchaînées, plus fortes et plus rapides |
+| R | Retour au départ |
+| Échap | Pause |
+| F3 ou ² | Panneau de debug |
+
+Les touches sont liées par code physique (`KeyboardEvent.code`), donc ZQSD et WASD sont la même rangée.
+
 ## Arborescence
 
 ```
@@ -38,19 +53,26 @@ src/
     GameLoop.ts         boucle à pas fixe avec accumulateur et stats
     Renderer.ts         WebGLRenderer, pixel ratio plafonné, resize
     Input.ts            actions abstraites, sources d'input enfichables (clavier pour l'instant)
-    CameraRig.ts        caméra de suivi lissée
+    CameraRig.ts        caméra troisième personne : amortissement, FOV selon la vitesse, collision
   physics/
-    PhysicsWorld.ts     chargement WASM, monde Rapier, matériaux de surface
-    InterpolatedBody.ts lien corps Rapier <-> Object3D avec interpolation
+    PhysicsWorld.ts     chargement WASM, monde Rapier, colliders statiques et matériaux, rayons
+    InterpolatedBody.ts interpolation d'une PoseSource (corps Rapier, skateur) vers un Object3D
   skater/
+    Skater.ts           simulation : intégration, suivi du sol, obstacles, réception
+    skaterStates.ts     états idle, pushing, riding, braking, air
     StateMachine.ts     machine à états générique
-    states.ts           identifiants des états du skateur
+    states.ts           identifiants de tous les états prévus
+    SkaterRig.ts        interface du visuel animable et pose d'animation
+    ProceduralSkaterRig.ts skateur en primitives (planche, 4 roues, rider à IK)
+    SkaterVisual.ts     relie simulation et rig, interpole la pose d'animation
   world/
-    Level.ts            sol, éclairage, colliders statiques
+    Level.ts            skatepark de test : sol, murs, modules, éclairage
+    parkModules.ts      constructeurs de modules (visuel + colliders depuis un même profil)
     assets.ts           AssetProvider et son implémentation procédurale
     textures.ts         textures générées par code
   ui/
-    DebugOverlay.ts     FPS, temps de frame, pas physiques, draw calls
+    DebugOverlay.ts     FPS, temps de frame, pas physiques, draw calls, état du skateur
+    PauseOverlay.ts     voile de pause
   audio/
     AudioEngine.ts      contexte Web Audio déverrouillé au premier geste, bus master
 ```
@@ -62,7 +84,15 @@ src/
 - **Input** : le gameplay lit un `InputSnapshot` (sticks `move` et `flick`, boutons `held` et `pressed`) produit une fois par pas fixe par `Input.poll()`. Le gameplay ne lit jamais une touche ou un pointeur directement. Les contrôles tactiles (étape 9) et la manette seront de nouvelles `InputSource`.
 - **Assets** : tout visuel est demandé à un `AssetProvider` par identifiant (`AssetId`). L'implémentation actuelle est `ProceduralAssets`. Pour passer aux modèles glTF, écrire une `GltfAssets` qui implémente la même interface et la passer à `Game` dans `main.ts`. Le gameplay ne crée jamais de mesh lui-même.
 - **Audio** : les voix se branchent sur `AudioEngine.output`. Même principe que les assets pour remplacer plus tard la synthèse par des samples.
-- **Skateur** : chaque état implémente `State<SkaterStateId, Ctx>` et renvoie l'état suivant depuis `update`. Les transitions ne se font qu'à pas fixe.
+- **Skateur** : chaque état implémente `State<SkaterStateId, Skater>` et renvoie l'état suivant depuis `update`. Les états écrivent des intentions (`pushAccel`, `brake`, `lean`) ; `Skater.step` les intègre. Les transitions ne se font qu'à pas fixe.
+- **Physique du skateur** : pas de corps dynamique. La vitesse est intégrée à la main, puis :
+  - deux rayons de sol, un par truck, donnent contact et normale (la planche s'appuie sur la droite qui les relie) ;
+  - une arête convexe fait décoller si la vitesse d'éloignement du nouveau plan dépasse ce que la gravité courbe pendant le passage de l'entraxe (`GROUND.convexLaunchSpeed`), sinon la planche suit sans perte d'énergie autre que `transitionSpeedLoss` ;
+  - six rayons au ras de la planche (`GROUND.wallRayHeight`) arrêtent les obstacles bas (curbs, ledges) ; une face plus raide que `GROUND.wallAngle` est un mur, une pente est laissée aux sondes ;
+  - une capsule surélevée (`BODY.capsuleClearance`) et le `KinematicCharacterController` de Rapier gèrent les obstacles hauts ;
+  - un choc rasant (`GROUND.wallDeflectAngle`) redresse la planche le long du mur.
+- **Modules de skatepark** : un profil 2D extrudé donne le visuel, sa décomposition convexe donne les colliders (`ColliderDesc.convexHull`). Les colonnes adjacentes partagent leurs arêtes exactement, ce qui évite les accrocs aux raccords.
+- **Caméra** : les requêtes de collision passent par un callback fourni par `Game`, `CameraRig` ne dépend pas de Rapier. Rapprochement immédiat quand le décor bouche la vue, recul amorti.
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
 ## Conventions de code
@@ -81,7 +111,7 @@ src/
 ## Étapes du projet
 
 - [x] 0. Initialisation : stack, arborescence, boucle à pas fixe 120 Hz, rendu interpolé, compteur FPS de debug, config centralisée
-- [ ] 1. Scène, poussée, caméra
+- [x] 1. Scène, poussée, caméra : skatepark de test, skateur en primitives, machine à états (idle, pousse, roule, freine, air), carve à l'inclinaison, caméra amortie avec collision
 - [ ] 2. Ollie
 - [ ] 3. Flicks et flips
 - [ ] 4. Grabs

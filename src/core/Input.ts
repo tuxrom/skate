@@ -4,10 +4,13 @@ import { INPUT } from '@/config/physics';
  * Actions de jeu abstraites. Le gameplay ne lit jamais une touche directement :
  * il lit des actions, quelle que soit la source (clavier, manette, tactile).
  */
-export type ButtonAction = 'push' | 'brake' | 'grabLeft' | 'grabRight' | 'reset' | 'debug' | 'pause';
+export type ButtonAction = 'push' | 'boost' | 'reset' | 'debug' | 'pause';
 
 export interface InputSnapshot {
-  /** Stick gauche : direction / équilibre. x vers la droite, y vers l'avant, dans [-1, 1]. */
+  /**
+   * Stick gauche : direction. x vers la droite (inclinaison), y vers l'avant (groupé)
+   * ou l'arrière (frein), dans [-1, 1].
+   */
   move: { x: number; y: number };
   /** Stick droit : flick de la planche (style Skate). */
   flick: { x: number; y: number };
@@ -30,18 +33,21 @@ export interface MutableSnapshot {
   held: Set<ButtonAction>;
 }
 
+/**
+ * Liaisons par code physique (KeyboardEvent.code) : la même touche fonctionne en AZERTY
+ * et en QWERTY. KeyW/KeyA/KeyS/KeyD correspondent à Z/Q/S/D sur un clavier AZERTY.
+ */
 const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
   Space: 'push',
-  ShiftLeft: 'brake',
-  KeyQ: 'grabLeft',
-  KeyE: 'grabRight',
+  ShiftLeft: 'boost',
+  ShiftRight: 'boost',
   KeyR: 'reset',
   F3: 'debug',
   Backquote: 'debug',
   Escape: 'pause',
 };
 
-/** Clavier : WASD pour le stick gauche, flèches pour le stick droit. */
+/** Clavier : ZQSD/WASD et flèches pour le stick gauche. Le stick droit (flick) sera lié à l'étape 3. */
 export class KeyboardSource implements InputSource {
   private readonly down = new Set<string>();
   /** Touches enfoncées depuis le dernier sample, conservées même si déjà relâchées (tap court). */
@@ -55,10 +61,8 @@ export class KeyboardSource implements InputSource {
 
   sample(s: MutableSnapshot): void {
     const axis = (neg: string, pos: string) => (this.down.has(pos) ? 1 : 0) - (this.down.has(neg) ? 1 : 0);
-    s.move.x += axis('KeyA', 'KeyD');
-    s.move.y += axis('KeyS', 'KeyW');
-    s.flick.x += axis('ArrowLeft', 'ArrowRight');
-    s.flick.y += axis('ArrowDown', 'ArrowUp');
+    s.move.x += clampUnit(axis('KeyA', 'KeyD') + axis('ArrowLeft', 'ArrowRight'));
+    s.move.y += clampUnit(axis('KeyS', 'KeyW') + axis('ArrowDown', 'ArrowUp'));
     for (const code of this.down) this.addAction(s, code);
     for (const code of this.tapped) this.addAction(s, code);
     this.tapped.clear();
@@ -70,7 +74,7 @@ export class KeyboardSource implements InputSource {
   }
 
   private readonly onDown = (e: KeyboardEvent): void => {
-    if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'F3') e.preventDefault();
+    if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'F3' || e.code === 'Tab') e.preventDefault();
     if (e.repeat) return;
     this.down.add(e.code);
     this.tapped.add(e.code);
@@ -95,7 +99,7 @@ export class KeyboardSource implements InputSource {
 /** Agrège les sources et produit un snapshot par pas fixe. */
 export class Input {
   private readonly sources: InputSource[] = [];
-  private previousHeld = new Set<ButtonAction>();
+  private readonly previousHeld = new Set<ButtonAction>();
   private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, held: new Set() };
   private readonly snapshot: InputSnapshot = {
     move: { x: 0, y: 0 },
@@ -125,7 +129,8 @@ export class Input {
     held.clear();
     for (const a of b.held) held.add(a);
 
-    this.previousHeld = new Set(b.held);
+    this.previousHeld.clear();
+    for (const a of b.held) this.previousHeld.add(a);
     return this.snapshot;
   }
 
@@ -133,6 +138,10 @@ export class Input {
     for (const s of this.sources) s.dispose();
     this.sources.length = 0;
   }
+}
+
+function clampUnit(v: number): number {
+  return v < -1 ? -1 : v > 1 ? 1 : v;
 }
 
 /** Borne le stick au disque unité et applique une zone morte radiale rééchelonnée. */
