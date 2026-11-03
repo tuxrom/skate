@@ -11,7 +11,7 @@ function ollieStart(sk: Skater): SkaterStateId | null {
   const source = sk.ollieStartRequested();
   if (!source) return null;
   if (source === 'buffered') {
-    sk.startCharge('button');
+    sk.startBufferedPop();
     return 'pop';
   }
   sk.startCharge(source);
@@ -158,7 +158,7 @@ const popCharge: SkaterState = {
       sk.coyoteCharge = sk.charge;
       return 'air';
     }
-    const release = sk.ollieReleaseRequested(dt);
+    const release = sk.ollieReleaseRequested();
     if (release === 'pop') return 'pop';
     if (release === 'cancel') {
       sk.cancelCharge();

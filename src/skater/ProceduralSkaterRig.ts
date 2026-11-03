@@ -44,8 +44,18 @@ const HIP_HEIGHT_EXTEND = 0.9;
 const CHARGE_CROUCH = 0.95;
 const AIR_TUCK = 0.6;
 const AIR_RELAX = 0.35;
+/** Centre de rotation des flips et shoves : milieu du deck. */
+const DECK_MID = DECK_BOTTOM + DECK_THICKNESS / 2;
+/** Hauteur dont les pieds s'écartent du deck pendant une rotation (m). */
+const FEET_LIFT = 0.2;
+/** Écartement supplémentaire des pieds pendant une rotation (m, le long du board). */
+const FEET_SPREAD = 0.05;
+/** Genoux rentrés quand les pieds quittent le board (flexion 0 à 1). */
+const FEET_LIFT_CROUCH = 0.75;
 
 const UP = new THREE.Vector3(0, 1, 0);
+const AXIS_Y = new THREE.Vector3(0, 1, 0);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
 const KNEE_HINT = new THREE.Vector3(1, 0, 0);
 
 /** Segment cylindrique tendu entre deux points (membres). */
@@ -74,6 +84,10 @@ export class ProceduralSkaterRig implements SkaterRig {
   private readonly roll = new THREE.Group();
   /** Tangage du board seul, autour des roues arrière. */
   private readonly pitchPivot = new THREE.Group();
+  /** Rotations de trick du board seul, autour du centre du deck. */
+  private readonly trickPivot = new THREE.Group();
+  private readonly qShove = new THREE.Quaternion();
+  private readonly qFlip = new THREE.Quaternion();
   private readonly board = new THREE.Group();
   private readonly rider = new THREE.Group();
   private readonly torso = new THREE.Group();
@@ -117,8 +131,10 @@ export class ProceduralSkaterRig implements SkaterRig {
     this.root.add(this.roll);
     this.roll.add(this.pitchPivot);
     this.pitchPivot.position.z = PIVOT_Z;
-    this.pitchPivot.add(this.board);
-    this.board.position.z = -PIVOT_Z;
+    this.pitchPivot.add(this.trickPivot);
+    this.trickPivot.position.set(0, DECK_MID, -PIVOT_Z);
+    this.trickPivot.add(this.board);
+    this.board.position.y = -DECK_MID;
     this.buildBoard(m);
     this.roll.add(this.rider);
     this.rider.position.y = DECK_TOP;
@@ -195,11 +211,16 @@ export class ProceduralSkaterRig implements SkaterRig {
     // Roulis : inclinaison, plus le déséquilibre d'une réception sale. Tangage : ollie.
     this.roll.rotation.z = -(pose.lean + landing.wobble);
     this.pitchPivot.rotation.x = ollie.pitch;
+    // Trick : shove autour de l'axe vertical du board, puis flip autour de son axe long (repère du board).
+    this.qShove.setFromAxisAngle(AXIS_Y, -pose.trickShove);
+    this.qFlip.setFromAxisAngle(AXIS_Z, pose.trickFlip);
+    this.trickPivot.quaternion.multiplyQuaternions(this.qShove, this.qFlip);
 
     const pushing = pose.pushPhase >= 0;
     const contact = pushing && pose.pushPhase < 1;
     const pushWeight = pushing ? (contact ? 1 : 1 - smooth(pose.pushPhase - 1)) : 0;
-    const crouch = Math.max(pose.crouch, pushWeight * 0.45, pose.brake * 0.35, ollie.crouch, landing.crouch);
+    const lift = pose.feetLift;
+    const crouch = Math.max(pose.crouch, pushWeight * 0.45, pose.brake * 0.35, ollie.crouch, landing.crouch, lift * FEET_LIFT_CROUCH);
 
     // Bassin : se baisse et se décale sur le pied avant pendant la poussée, se tend au pop.
     const hipHeight = lerp(lerp(HIP_HEIGHT_STAND, HIP_HEIGHT_CROUCH, crouch), HIP_HEIGHT_EXTEND, ollie.extend);
@@ -208,11 +229,12 @@ export class ProceduralSkaterRig implements SkaterRig {
     this.torso.rotation.set(0, 0, -(pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15 + landing.wobble * 0.8));
 
     // Pied avant : sur le deck, il recule pendant la charge puis glisse vers le nose pour niveler.
-    this.deckPoint(this.frontFoot, FRONT_FOOT.x, FRONT_FOOT.y, ollie.frontZ, ollie.pitch);
+    // Pendant une rotation, les pieds quittent le deck (vers le haut et un peu vers les extrémités), puis le rattrapent.
+    this.deckPoint(this.frontFoot, FRONT_FOOT.x, FRONT_FOOT.y + lift * FEET_LIFT, ollie.frontZ - lift * FEET_SPREAD, ollie.pitch);
     this.solveLeg(this.frontFoot, -1, this.frontThigh, this.frontShin, this.frontKnee, this.frontShoe);
 
     // Pied arrière : sur le tail pendant l'ollie, au sol pour pousser, ou en frein.
-    this.deckPoint(this.foot, BACK_FOOT.x, BACK_FOOT.y, ollie.backZ, ollie.pitch);
+    this.deckPoint(this.foot, BACK_FOOT.x, BACK_FOOT.y + lift * FEET_LIFT, ollie.backZ + lift * FEET_SPREAD, ollie.pitch);
     if (pushing) {
       const groundY = ANKLE_HEIGHT - DECK_TOP;
       if (contact) {

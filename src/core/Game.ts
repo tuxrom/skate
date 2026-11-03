@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 import { GameLoop } from './GameLoop';
 import { Renderer } from './Renderer';
-import { GamepadSource, Input, KeyboardSource, type InputSnapshot } from './Input';
+import { GamepadSource, Input, KeyboardSource, MouseFlickSource, type InputSnapshot } from './Input';
 import { CameraRig, type CameraTarget } from './CameraRig';
 import { PhysicsWorld, type Rapier } from '@/physics/PhysicsWorld';
 import { Level, SPAWN } from '@/world/Level';
 import type { AssetProvider } from '@/world/assets';
-import { Skater, type LandingInfo } from '@/skater/Skater';
+import { Skater, type ActiveTrick, type LandingInfo } from '@/skater/Skater';
+import { trickName } from '@/skater/tricks';
+import { FlickDebugPanel } from '@/ui/FlickDebugPanel';
 import { SkaterVisual } from '@/skater/SkaterVisual';
 import { AudioEngine } from '@/audio/AudioEngine';
 import { DebugOverlay } from '@/ui/DebugOverlay';
@@ -35,6 +37,7 @@ export class Game {
   private readonly audio = new AudioEngine();
   private readonly debug: DebugOverlay;
   private readonly pauseOverlay: PauseOverlay;
+  private readonly flickPanel: FlickDebugPanel;
   private readonly loop: GameLoop;
   private readonly dust = new DustEffect();
 
@@ -54,13 +57,19 @@ export class Game {
   /** Dernière réception, pour le debug et les tests. */
   private landings = 0;
   private lastLandingText = '-';
+  private lastTrickText = '-';
+  private lastTrick = '';
+  private lastTrickScore = 0;
   private cameraOverride: THREE.Vector3 | null = null;
+  private lastFlickX = 0;
+  private lastFlickY = 0;
   private readonly forwardView = new THREE.Vector3();
 
   constructor(opts: GameOptions) {
     this.renderer = new Renderer(opts.container);
     this.input.addSource(new KeyboardSource());
     this.input.addSource(new GamepadSource());
+    this.input.addSource(new MouseFlickSource(this.renderer.canvas));
 
     this.physics = new PhysicsWorld(opts.rapier);
     this.level = new Level(this.scene, this.physics, opts.assets);
@@ -70,7 +79,7 @@ export class Game {
     this.scene.add(this.skaterVisual.object);
     this.scene.add(this.dust.object);
     this.skater.events = {
-      pop: (charge, position) => this.onPop(charge, position),
+      pop: (charge, position, trick) => this.onPop(charge, position, trick),
       land: (info) => this.onLand(info),
     };
 
@@ -85,6 +94,7 @@ export class Game {
 
     this.debug = new DebugOverlay(opts.container, opts.debug);
     this.pauseOverlay = new PauseOverlay(opts.container);
+    this.flickPanel = new FlickDebugPanel(opts.container, opts.debug);
     this.loop = new GameLoop(
       {
         fixedUpdate: (dt) => this.fixedUpdate(dt),
@@ -143,6 +153,18 @@ export class Game {
       predValid: sk.prediction.valid,
       predY: sk.prediction.point.y,
       predT: sk.prediction.time,
+      trick: this.lastTrick,
+      trickScore: this.lastTrickScore,
+      trickProgress: Math.min(1, sk.trick.time / sk.trick.duration),
+      landTrick: sk.lastLanding.trick,
+      landResidual: sk.lastLanding.boardResidual,
+      gesturePhase: this.input.flickRecognizer.currentPhase,
+      gestureTrick: this.input.flickRecognizer.lastEvent?.trick ?? '',
+      gestureScore: this.input.flickRecognizer.lastEvent?.score ?? 0,
+      gestureSweep: this.input.flickRecognizer.lastEvent?.features.sweep ?? 0,
+      gestureEnd: this.input.flickRecognizer.lastEvent?.features.endAngle ?? 0,
+      gestureMinR: this.input.flickRecognizer.lastEvent?.features.minRadius ?? 0,
+      gestureDuration: this.input.flickRecognizer.lastEvent?.features.duration ?? 0,
       camX: cam.position.x,
       camY: cam.position.y,
       camZ: cam.position.z,
@@ -152,8 +174,11 @@ export class Game {
     };
   }
 
-  private onPop(charge: number, position: THREE.Vector3): void {
+  private onPop(charge: number, position: THREE.Vector3, trick: ActiveTrick): void {
     this.audio.pop(charge);
+    this.lastTrick = trick.id;
+    this.lastTrickScore = trick.score;
+    this.lastTrickText = `${trickName(trick.id, trick.side)} ${(trick.score * 100).toFixed(0)} %, rot ${trick.duration.toFixed(2)} s`;
     // Poussière sous le tail, qui vient de frapper le sol.
     this.tailPoint.copy(this.skater.forward).multiplyScalar(-0.3).add(position);
     this.dust.burst(this.tailPoint, this.skater.up, FX.dustOnPop, 0.6);
@@ -165,7 +190,7 @@ export class Game {
     this.dust.burst(info.position, info.normal, info.impactSpeed * FX.dustPerImpactSpeed, 0.6 + strength);
     this.pendingImpact = Math.max(this.pendingImpact, info.impactSpeed);
     this.landings++;
-    this.lastLandingText = `${info.quality} ${info.impactSpeed.toFixed(1)} m/s, h ${info.peakHeight.toFixed(2)} m`;
+    this.lastLandingText = `${info.quality} ${info.impactSpeed.toFixed(1)} m/s, h ${info.peakHeight.toFixed(2)} m, reste ${info.boardResidual.toFixed(2)} rad`;
   }
 
   private respawn(): void {
@@ -178,6 +203,8 @@ export class Game {
 
   private fixedUpdate(dt: number): void {
     const input = this.input.poll();
+    this.lastFlickX = input.flick.x;
+    this.lastFlickY = input.flick.y;
     this.handleGlobalActions(input);
     if (this.paused) return;
 
@@ -188,7 +215,10 @@ export class Game {
   }
 
   private handleGlobalActions(input: InputSnapshot): void {
-    if (input.pressed.has('debug')) this.debug.toggle();
+    if (input.pressed.has('debug')) {
+      this.debug.toggle();
+      this.flickPanel.setVisible(this.debug.isVisible);
+    }
     if (input.pressed.has('pause')) this.setPaused(!this.paused);
     if (input.pressed.has('reset')) {
       this.respawn();
@@ -245,8 +275,10 @@ export class Game {
       surf: sk.surface,
       pos: `${sk.position.x.toFixed(1)} ${sk.position.y.toFixed(2)} ${sk.position.z.toFixed(1)}`,
       charge: sk.charge > 0 ? `${(sk.charge * 100).toFixed(0)} %` : '-',
+      trick: this.lastTrickText,
       land: this.lastLandingText,
     });
+    this.flickPanel.update(this.input.flickRecognizer, this.lastFlickX, this.lastFlickY);
   }
 
   private readonly onVisibility = (): void => {

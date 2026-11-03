@@ -223,15 +223,25 @@ export const LANDING = {
 
 /** Flips et grabs. */
 export const TRICKS = {
-  /** Vitesse de rotation d'un kickflip / heelflip (tours/s). */
-  flipRate: 2.6,
-  /** Vitesse de rotation d'un shove-it (tours/s). */
-  shoveRate: 1.8,
+  /**
+   * Part du temps de vol prévu consacrée à la rotation du board. Un saut plus haut donne
+   * donc une rotation plus lente et plus lisible.
+   */
+  rotationAirFraction: 0.8,
+  /** Durée de rotation minimale (s), pour qu'un flip sur un petit pop reste rattrapable. */
+  minRotationTime: 0.26,
+  /** Durée de rotation maximale (s). */
+  maxRotationTime: 0.6,
+  /** Dernière fraction de la rotation pendant laquelle les pieds reviennent sur le board (0 à 1). */
+  catchFraction: 0.3,
   /** Temps pour qu'un grab soit tenu et compté (s). */
   grabMinHold: 0.15,
   /** Ralentissement de la rotation pendant un grab (multiplicateur). */
   grabSpinDamping: 0.6,
-  /** Tolérance d'angle de rotation de planche résiduelle à la réception (rad). */
+  /**
+   * Rotation de board restant à faire à la réception tolérée sans pénalité (rad).
+   * Jusqu'au double, la réception est sale ; au-delà, le board n'est pas sous les pieds.
+   */
   landFlipTolerance: 0.45,
 } as const;
 
@@ -275,20 +285,28 @@ export const INPUT = {
   popBufferMs: 120,
   /** Relâcher la charge juste après avoir quitté une arête déclenche encore le pop (coyote time, ms). */
   coyoteMs: 90,
-  /** Stick droit vers le bas au-delà de ce seuil : début de charge d'ollie (0 à 1). */
-  ollieStickDown: 0.6,
-  /** Stick droit vers le haut au-delà de ce seuil, après la charge : pop (0 à 1). */
-  ollieStickUp: 0.6,
-  /** Fenêtre pour donner le flick vers le haut une fois le stick sorti du bas, sinon la charge est annulée (ms). */
+  /** Fenêtre pour finir le flick une fois le stick revenu au centre sans l'avoir terminé, sinon la charge est annulée (ms). */
   flickWindowMs: 180,
-  /** Amplitude minimale du stick pour qu'un flick soit reconnu (0 à 1). */
-  flickThreshold: 0.6,
   /** Zone morte des sticks (0 à 1). */
   stickDeadzone: 0.15,
   /** Fenêtre de réception pour enchaîner un manual (ms). */
   manualWindowMs: 150,
   /** Délai entre deux appuis pour un double tap de poussée (ms). */
   doubleTapMs: 250,
+  /** Rayon du stick virtuel de la souris (px) : un glissé de cette longueur met le stick en butée. */
+  mouseStickRadiusPx: 70,
+  /** Au-delà de ce multiple du rayon, l'origine du glissé suit la souris (pas de course morte). */
+  mouseOriginFollow: 1.5,
+  /** Réponse du stick virtuel des flèches (1/s). Assez haut pour un flick, assez bas pour tracer des arcs. */
+  keyStickResponse: 40,
+  /**
+   * Entre deux flèches voisines (écart de direction sous cet angle, rad), le stick virtuel déjà
+   * près du bord tourne le long du bord au lieu de couper : une suite de flèches trace un vrai arc.
+   * Sinon (bas puis haut, bas puis diagonale), il va en ligne droite et trace un trait.
+   */
+  keyStickArcMaxAngle: (50 * Math.PI) / 180,
+  /** Rayon du stick virtuel au-delà duquel le suivi du bord s'applique (0 à 1). */
+  keyStickArcMinRadius: 0.75,
   /** Seuil du stick vers l'arrière pour freiner (0 à 1). */
   brakeThreshold: 0.5,
   /** Seuil du stick vers l'avant pour se grouper (0 à 1). */
@@ -297,6 +315,53 @@ export const INPUT = {
   pushBufferMs: 200,
   /** Vitesse de lissage du stick virtuel tactile (1/s). */
   touchStickSmoothing: 18,
+} as const;
+
+const DEG = Math.PI / 180;
+
+/**
+ * Reconnaissance des gestes de flick au stick droit (souris, flèches, manette).
+ * Angles en radians, mesurés comme sur un cercle trigonométrique : 0 à droite, π/2 en haut.
+ */
+export const FLICK = {
+  /**
+   * Sensibilité de la reconnaissance : multiplie toutes les tolérances.
+   * 1 par défaut, 1,5 plus permissif, 0,7 plus exigeant.
+   */
+  sensitivity: 1,
+  /** Rayon du stick qui démarre un geste (0 à 1). */
+  startRadius: 0.3,
+  /** Zone de charge : stick en bas, au-delà de ce rayon (0 à 1). */
+  chargeRadius: 0.55,
+  /** Zone de charge : écart angulaire max avec la verticale basse (rad). */
+  chargeHalfAngle: 50 * DEG,
+  /** Rayon sous lequel le stick est relâché (0 à 1). */
+  releaseRadius: 0.22,
+  /** Rayon à atteindre hors de la zone de charge pour que le geste compte (0 à 1). */
+  reachRadius: 0.5,
+  /** Fin du geste si le stick reste immobile hors du centre pendant cette durée (ms). */
+  holdEndMs: 110,
+  /** Déplacement du stick par pas sous lequel il est considéré immobile. */
+  holdEndMotion: 0.012,
+  /** Durée maximale de la partie flick du geste (ms). Un cercle complet tracé posément prend 400 à 700 ms. */
+  maxFlickMs: 900,
+  /** Rayon minimal pour qu'un segment compte dans l'angle balayé (0 à 1). */
+  sweepMinRadius: 0.3,
+  /**
+   * Frontière entre trait droit et arc : rayon minimal atteint par le chemin après la charge.
+   * Un trait coupe le disque intérieur, un arc reste sur le bord.
+   */
+  arcRadius: 0.5,
+  /** Largeur de la transition trait / arc autour de arcRadius. */
+  arcRadiusWidth: 0.12,
+  /** Tolérance sur l'angle de départ, attendu en bas (rad). */
+  startTolerance: 55 * DEG,
+  /** Tolérance sur l'angle de sortie (rad). */
+  endTolerance: 28 * DEG,
+  /** Tolérance sur l'angle balayé (rad). */
+  sweepTolerance: 40 * DEG,
+  /** Score minimal pour retenir un trick ; en dessous, un geste vers le haut donne un ollie. */
+  minScore: 0.3,
 } as const;
 
 /** Score et combos. */

@@ -28,6 +28,10 @@ export class DebugOverlay {
     this.el.style.display = visible ? 'block' : 'none';
   }
 
+  get isVisible(): boolean {
+    return this.visible;
+  }
+
   toggle(): void {
     this.visible = !this.visible;
     this.el.style.display = this.visible ? 'block' : 'none';

@@ -25,6 +25,14 @@ export interface SkaterPose {
   landImpact: number;
   /** Qualité de cette réception : 0 propre, 1 sale, 2 hors limites. */
   landQuality: number;
+  /** Rotation du board autour de son axe long (rad), positive dans le sens du kickflip. */
+  trickFlip: number;
+  /** Rotation du board autour de son axe vertical (rad), positive en backside. */
+  trickShove: number;
+  /** Pieds décollés du board pendant la rotation (0 sur le board, 1 au plus loin). */
+  feetLift: number;
+  /** Progression de la rotation (0 à 1), 1 hors trick. */
+  trickProgress: number;
 }
 
 export function createPose(): SkaterPose {
@@ -41,6 +49,10 @@ export function createPose(): SkaterPose {
     landTime: -1,
     landImpact: 0,
     landQuality: 0,
+    trickFlip: 0,
+    trickShove: 0,
+    feetLift: 0,
+    trickProgress: 1,
   };
 }
 
@@ -57,6 +69,10 @@ export function copyPose(out: SkaterPose, src: SkaterPose): void {
   out.landTime = src.landTime;
   out.landImpact = src.landImpact;
   out.landQuality = src.landQuality;
+  out.trickFlip = src.trickFlip;
+  out.trickShove = src.trickShove;
+  out.feetLift = src.feetLift;
+  out.trickProgress = src.trickProgress;
 }
 
 /**

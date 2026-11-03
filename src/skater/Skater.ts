@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
-import { BAIL, BODY, GROUND, INPUT, LANDING, MATERIALS, POP, SKATING, WORLD, type SurfaceMaterial } from '@/config/physics';
+import { BAIL, BODY, GROUND, INPUT, LANDING, MATERIALS, POP, SKATING, TRICKS, WORLD, type SurfaceMaterial } from '@/config/physics';
 import type { PhysicsWorld, RayHit } from '@/physics/PhysicsWorld';
 import type { PoseSource } from '@/physics/InterpolatedBody';
 import type { InputSnapshot } from '@/core/Input';
+import type { FlickEvent } from '@/core/FlickRecognizer';
+import { TRICK_DEFS, type TrickId } from './tricks';
 import { StateMachine } from './StateMachine';
 import type { SkaterStateId } from './states';
 import { registerSkaterStates } from './skaterStates';
@@ -38,13 +40,17 @@ export interface LandingInfo {
   peakHeight: number;
   /** Vrai si le vol a commencé par un pop. */
   popped: boolean;
+  /** Trick du vol. */
+  trick: TrickId;
+  /** Rotation de board qui restait à faire au contact (rad). */
+  boardResidual: number;
   readonly position: THREE.Vector3;
   readonly normal: THREE.Vector3;
 }
 
 /** Écouteurs des événements ponctuels du skateur (son, particules, caméra). */
 export interface SkaterEvents {
-  pop?(charge: number, position: THREE.Vector3): void;
+  pop?(charge: number, position: THREE.Vector3, trick: ActiveTrick): void;
   land?(info: LandingInfo): void;
 }
 
@@ -59,7 +65,37 @@ export interface LandingPrediction {
 
 type ChargeSource = 'button' | 'stick';
 
-const EMPTY_INPUT: InputSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, held: new Set(), pressed: new Set() };
+/** Trick en cours : rotation du board pendant le vol, figée à la réception. */
+export interface ActiveTrick {
+  id: TrickId;
+  /** Sens du geste (+1, -1, 0). */
+  side: number;
+  /** Score de reconnaissance du geste (1 pour un ollie au bouton). */
+  score: number;
+  /** Tours de flip et de shove, signés. */
+  flips: number;
+  shove: number;
+  /** Durée de la rotation (s), liée à la hauteur du saut. */
+  duration: number;
+  /** Temps écoulé depuis le décollage (s). */
+  time: number;
+  /** Progression adoucie figée au contact (0 à 1), -1 tant qu'on est en l'air. */
+  landedProgress: number;
+}
+
+/** Progression de rotation adoucie : rapide au flick, ralentie au rattrapage. */
+export function trickEase(p: number): number {
+  const x = p < 0 ? 0 : p > 1 ? 1 : p;
+  return 1 - (1 - x) * (1 - x);
+}
+
+const EMPTY_INPUT: InputSnapshot = {
+  move: { x: 0, y: 0 },
+  flick: { x: 0, y: 0 },
+  gesture: { charging: false, flicking: false, event: null, cancelled: false },
+  held: new Set(),
+  pressed: new Set(),
+};
 
 /** Résultat combiné des deux sondes de sol (trucks avant et arrière). */
 interface GroundContact {
@@ -115,8 +151,6 @@ export class Skater implements PoseSource {
   /** Charge de l'ollie (0 à 1). */
   charge = 0;
   private chargeSource: ChargeSource | null = null;
-  /** Temps passé hors de la zone basse du stick pendant une charge au stick (s). */
-  private stickOutTimer = 0;
   /** Temps écoulé dans l'état pop (s). */
   popTimer = 0;
   /** Temps depuis le début du pop, pour l'animation (s), -1 sinon. */
@@ -126,6 +160,9 @@ export class Skater implements PoseSource {
   /** Instant du dernier appui d'ollie, pour le buffer de réception (s). */
   private lastOllieTap = -Infinity;
   private airYawRate = 0;
+  /** Geste reconnu en attente du pop. */
+  private pendingFlick: FlickEvent | null = null;
+  readonly trick: ActiveTrick = { id: 'ollie', side: 0, score: 1, flips: 0, shove: 0, duration: 1, time: 0, landedProgress: 1 };
   private takeoffY = 0;
   private peakY = 0;
   private popped = false;
@@ -144,6 +181,8 @@ export class Skater implements PoseSource {
     airTime: 0,
     peakHeight: 0,
     popped: false,
+    trick: 'ollie',
+    boardResidual: 0,
     position: new THREE.Vector3(),
     normal: new THREE.Vector3(0, 1, 0),
   };
@@ -226,6 +265,9 @@ export class Skater implements PoseSource {
     this.landTime = -1;
     this.recovery = 0;
     this.airYawRate = 0;
+    this.pendingFlick = null;
+    this.trick.landedProgress = 1;
+    this.trick.flips = this.trick.shove = 0;
     this.prediction.valid = false;
     this.grounded = this.probeGround(GROUND.probeHeight + 2) !== null;
     if (this.grounded) this.applyContact(this.contact);
@@ -261,7 +303,12 @@ export class Skater implements PoseSource {
   ollieStartRequested(): ChargeSource | 'buffered' | null {
     const i = this.input;
     if (i.pressed.has('ollie') || i.held.has('ollie')) return 'button';
-    if (i.flick.y < -INPUT.ollieStickDown) return 'stick';
+    if (i.gesture.charging) return 'stick';
+    // Geste terminé alors que la charge n'avait pas été vue (récupération) : pop immédiat.
+    if (i.gesture.event) {
+      this.pendingFlick = i.gesture.event;
+      return 'buffered';
+    }
     if (this.time - this.lastOllieTap < INPUT.popBufferMs / 1000) return 'buffered';
     return null;
   }
@@ -269,8 +316,19 @@ export class Skater implements PoseSource {
   startCharge(source: ChargeSource): void {
     this.chargeSource = source;
     this.charge = 0;
-    this.stickOutTimer = 0;
     this.lastOllieTap = -Infinity;
+    if (source === 'button') this.pendingFlick = null;
+  }
+
+  /**
+   * Pop immédiat, sans charge vue au sol : tap mémorisé avant la réception, ou geste terminé
+   * pendant la récupération. La charge vient de la durée de charge du geste s'il y en a un.
+   */
+  startBufferedPop(): void {
+    this.chargeSource = 'button';
+    this.lastOllieTap = -Infinity;
+    const chargeTime = this.pendingFlick?.features.chargeTime ?? 0;
+    this.charge = clamp01(chargeTime / POP.chargeTime);
   }
 
   /** Fait monter la charge, linéaire jusqu'à POP.chargeTime. */
@@ -279,19 +337,18 @@ export class Skater implements PoseSource {
   }
 
   /**
-   * Fin de charge : 'pop' au relâchement du bouton ou au flick vers le haut,
-   * 'cancel' si le stick revient au centre sans flick dans la fenêtre.
+   * Fin de charge : 'pop' au relâchement du bouton ou quand le geste du stick droit est reconnu,
+   * 'cancel' si le stick revient au centre sans flick (voir FlickRecognizer).
+   * Un geste reconnu pendant une charge au bouton choisit aussi le trick.
    */
-  ollieReleaseRequested(dt: number): 'pop' | 'cancel' | null {
-    const i = this.input;
-    if (this.chargeSource === 'button') return i.held.has('ollie') ? null : 'pop';
-    if (i.flick.y > INPUT.ollieStickUp) return 'pop';
-    if (i.flick.y < -INPUT.ollieStickDown) {
-      this.stickOutTimer = 0;
-      return null;
+  ollieReleaseRequested(): 'pop' | 'cancel' | null {
+    const g = this.input.gesture;
+    if (g.event) {
+      this.pendingFlick = g.event;
+      return 'pop';
     }
-    this.stickOutTimer += dt;
-    return this.stickOutTimer * 1000 > INPUT.flickWindowMs ? 'cancel' : null;
+    if (this.chargeSource === 'button') return this.input.held.has('ollie') ? null : 'pop';
+    return g.cancelled ? 'cancel' : null;
   }
 
   cancelCharge(): void {
@@ -305,13 +362,19 @@ export class Skater implements PoseSource {
     return Math.sqrt(2 * -WORLD.gravity * h);
   }
 
-  /** Décollage : la vitesse tangentielle est conservée, le pop s'ajoute le long de la normale. */
+  /**
+   * Décollage : la vitesse tangentielle est conservée, le pop s'ajoute le long de la normale.
+   * Le trick en attente démarre ; sa rotation dure une part fixe du temps de vol prévu.
+   */
   performPop(charge: number): void {
     const v = this.velocity;
     const n = this.up;
     const vn = v.dot(n);
+    const popSpeed = Skater.popSpeed(charge);
     v.addScaledVector(n, -vn).multiplyScalar(POP.takeoffSpeedRetention);
-    v.addScaledVector(n, Math.max(0, vn) + Skater.popSpeed(charge));
+    v.addScaledVector(n, Math.max(0, vn) + popSpeed);
+    this.startTrick(this.pendingFlick, popSpeed);
+    this.pendingFlick = null;
     this.grounded = false;
     this.airTime = 0;
     this.popped = true;
@@ -322,7 +385,29 @@ export class Skater implements PoseSource {
     this.coyoteCharge = -1;
     this.predictionCountdown = 0;
     if (this.popTime < 0 || this.popTime < POP.popDelay) this.popTime = POP.popDelay;
-    this.events.pop?.(charge, this.position);
+    this.events.pop?.(charge, this.position, this.trick);
+  }
+
+  private startTrick(flick: FlickEvent | null, popSpeed: number): void {
+    const t = this.trick;
+    const id: TrickId = flick?.trick ?? 'ollie';
+    const def = TRICK_DEFS[id];
+    t.id = id;
+    t.side = flick?.side ?? 0;
+    t.score = flick?.score ?? 1;
+    t.flips = def.flips;
+    t.shove = def.shove * (def.shoveFollowsGesture && t.side < 0 ? -1 : 1);
+    const airTime = (2 * popSpeed) / -WORLD.gravity;
+    t.duration = THREE.MathUtils.clamp(airTime * TRICKS.rotationAirFraction, TRICKS.minRotationTime, TRICKS.maxRotationTime);
+    t.time = 0;
+    t.landedProgress = -1;
+  }
+
+  /** Rotation de board restant à faire si l'on touchait le sol maintenant (rad). */
+  boardResidual(): number {
+    const t = this.trick;
+    const remaining = 1 - trickEase(t.time / t.duration);
+    return Math.max(Math.abs(t.flips), Math.abs(t.shove)) * 2 * Math.PI * remaining;
   }
 
   /** En l'air juste après une arête : le relâchement de la charge déclenche encore le pop. */
@@ -333,7 +418,9 @@ export class Skater implements PoseSource {
       this.chargeSource = null;
       return false;
     }
-    const release = this.chargeSource === 'button' ? !this.input.held.has('ollie') : this.input.flick.y > INPUT.ollieStickUp;
+    const g = this.input.gesture;
+    if (g.event) this.pendingFlick = g.event;
+    const release = g.event !== null || (this.chargeSource === 'button' && !this.input.held.has('ollie'));
     if (!release) return false;
     // Le pop part de la vitesse actuelle : on annule la chute déjà acquise.
     const vy = this.velocity.dot(this.up);
@@ -421,6 +508,7 @@ export class Skater implements PoseSource {
   private airStep(dt: number): void {
     const v = this.velocity;
     this.airTime += dt;
+    if (this.trick.landedProgress < 0) this.trick.time += dt;
     v.addScaledVector(GRAVITY, dt);
 
     const target = -this.input.move.x * POP.airSpinRate;
@@ -584,11 +672,16 @@ export class Skater implements PoseSource {
 
     // Une simple descente d'arête sans impact notable n'est pas une réception à évaluer.
     const significant = this.popped || impact >= LANDING.minImpactForRecovery;
+    // Board pas encore rattrapé : il reste de la rotation à faire au contact.
+    const residual = this.popped ? this.boardResidual() : 0;
     let quality: LandingQuality = 'clean';
     if (significant) {
       if (tilt > BAIL.maxLandingTilt || yawError > BAIL.maxLandingYawError || impact > BAIL.maxImpactSpeed) quality = 'bail';
       else if (tilt > LANDING.cleanMaxTilt || yawError > LANDING.cleanMaxYawError) quality = 'sloppy';
+      if (residual > 2 * TRICKS.landFlipTolerance) quality = 'bail';
+      else if (residual > TRICKS.landFlipTolerance && quality === 'clean') quality = 'sloppy';
     }
+    if (this.trick.landedProgress < 0) this.trick.landedProgress = trickEase(this.trick.time / this.trick.duration);
     const retention =
       quality === 'clean' ? LANDING.cleanSpeedRetention : quality === 'sloppy' ? LANDING.sloppySpeedRetention : LANDING.bailSpeedRetention;
     if (significant) v.multiplyScalar(retention);
@@ -610,6 +703,8 @@ export class Skater implements PoseSource {
     info.airTime = this.airTime;
     info.peakHeight = Math.max(0, this.peakY - this.takeoffY);
     info.popped = this.popped;
+    info.trick = this.popped ? this.trick.id : 'ollie';
+    info.boardResidual = residual;
     info.position.copy(this.position);
     info.normal.copy(this.up);
     this.landTime = 0;
@@ -758,6 +853,44 @@ export class Skater implements PoseSource {
     out.landTime = this.landTime;
     out.landImpact = this.landTime >= 0 ? clamp01(this.lastLanding.impactSpeed / BAIL.maxImpactSpeed) : 0;
     out.landQuality = this.landTime >= 0 ? (this.lastLanding.quality === 'clean' ? 0 : this.lastLanding.quality === 'sloppy' ? 1 : 2) : 0;
+    this.writeTrickPose(out);
+  }
+
+  /**
+   * Angles du board pendant le trick. En l'air : rotation adoucie, pieds décollés jusqu'au rattrapage.
+   * Après la réception : l'angle figé au contact se recale sur l'orientation alignée la plus proche,
+   * vite si le board était rattrapé, après un temps de flottement sinon.
+   */
+  private writeTrickPose(out: SkaterPose): void {
+    const t = this.trick;
+    out.trickFlip = 0;
+    out.trickShove = 0;
+    out.feetLift = 0;
+    out.trickProgress = 1;
+    if (t.flips === 0 && t.shove === 0) return;
+    const full = 2 * Math.PI;
+    if (t.landedProgress < 0) {
+      const p = t.time / t.duration;
+      const e = trickEase(p);
+      out.trickFlip = t.flips * full * e;
+      out.trickShove = t.shove * full * e;
+      out.trickProgress = Math.min(1, p);
+      const lift = smoothstep(t.time / 0.05);
+      const caught = smoothstep((p - (1 - TRICKS.catchFraction)) / TRICKS.catchFraction);
+      out.feetLift = lift * (1 - caught);
+      return;
+    }
+    const e = t.landedProgress;
+    const flip = t.flips * full * e;
+    const shove = t.shove * full * e;
+    const missed = this.lastLanding.boardResidual > TRICKS.landFlipTolerance;
+    const l = this.landTime < 0 ? 10 : this.landTime;
+    const settle = missed ? smoothstep((l - 0.25) / 0.3) : smoothstep(l / 0.12);
+    // Le board est symétrique : un demi-tour de shove le remet dans l'axe.
+    out.trickFlip = flip + (Math.round(flip / full) * full - flip) * settle;
+    out.trickShove = shove + (Math.round(shove / Math.PI) * Math.PI - shove) * settle;
+    out.trickProgress = e;
+    out.feetLift = missed ? 1 - settle : 0;
   }
 
   dispose(): void {
@@ -781,6 +914,11 @@ function orthonormalize(forward: THREE.Vector3, up: THREE.Vector3): void {
   const z = forward.z - up.z * forward.dot(up);
   const len = Math.hypot(x, y, z);
   if (len > 1e-6) forward.set(x / len, y / len, z / len);
+}
+
+function smoothstep(t: number): number {
+  const x = t < 0 ? 0 : t > 1 ? 1 : t;
+  return x * x * (3 - 2 * x);
 }
 
 function clamp01(v: number): number {

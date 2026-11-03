@@ -54,6 +54,12 @@ export class SkaterVisual {
     o.landTime = lerpTimer(a.landTime, b.landTime, alpha);
     o.landImpact = b.landImpact;
     o.landQuality = b.landQuality;
+    // Les angles de trick repartent de zéro à chaque pop : pas d'interpolation à travers un saut d'angle.
+    const restart = Math.abs(b.trickFlip - a.trickFlip) > Math.PI || Math.abs(b.trickShove - a.trickShove) > Math.PI;
+    o.trickFlip = restart ? b.trickFlip : a.trickFlip + (b.trickFlip - a.trickFlip) * alpha;
+    o.trickShove = restart ? b.trickShove : a.trickShove + (b.trickShove - a.trickShove) * alpha;
+    o.feetLift = a.feetLift + (b.feetLift - a.feetLift) * alpha;
+    o.trickProgress = b.trickProgress;
     this.rig.update(o, dt);
   }
 }

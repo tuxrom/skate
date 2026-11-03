@@ -28,14 +28,31 @@ En mode debug, `window.__skate` expose le jeu : `debugState()` (état du skateur
 
 | Clavier | Manette | Action |
 | --- | --- | --- |
-| Z Q S D (AZERTY) / W A S D (QWERTY) / flèches | Stick gauche | Direction : gauche-droite inclinent la planche (et tournent le corps en l'air), arrière freine, avant groupe |
-| Espace maintenu puis relâché | Stick droit bas puis haut | Ollie : la durée de charge règle la hauteur |
+| Z Q S D (AZERTY) / W A S D (QWERTY) | Stick gauche | Direction : gauche-droite inclinent la planche (et tournent le corps en l'air), arrière freine, avant groupe |
+| Glisser bouton gauche maintenu, ou flèches en repli | Stick droit | Pieds du skateur : gestes de flick (tableau ci-dessous) |
+| Espace maintenu puis relâché | | Ollie : la durée de charge règle la hauteur |
 | Shift | A / Croix | Pousser ; maintenir enchaîne des poussées plus fortes (accélérer) |
 | R | Select | Retour au départ |
 | Échap | Start | Pause |
 | F3 ou ² | | Panneau de debug |
 
-Les touches sont liées par code physique (`KeyboardEvent.code`), donc ZQSD et WASD sont la même rangée. Au stick, ramener le stick droit au centre sans flick vers le haut annule la charge (`INPUT.flickWindowMs`).
+Les touches sont liées par code physique (`KeyboardEvent.code`), donc ZQSD et WASD sont la même rangée. À la souris, un glissé de `INPUT.mouseStickRadiusPx` met le stick en butée ; relâcher le bouton ramène le stick au centre et termine le geste. Aux flèches, le stick virtuel glisse vers la direction tenue (`INPUT.keyStickResponse`) et longe le bord entre deux flèches voisines (`keyStickArcMaxAngle`) : une suite ↓ ↙ ← ↖ ↑ trace un demi-cercle.
+
+### Gestes de flick (stick droit)
+
+Tout geste commence stick en bas (charge, le skateur s'accroupit ; la durée règle la hauteur). Le flick qui suit choisit le trick. Ramener le stick au centre sans flick annule la charge.
+
+| Geste après la charge | Trick |
+| --- | --- |
+| Trait vers le haut | Ollie |
+| Trait vers la diagonale haut-gauche | Kickflip |
+| Trait vers la diagonale haut-droite | Heelflip |
+| Demi-cercle par un côté, sortie en haut | Pop shove-it (par la droite : backside, par la gauche : frontside) |
+| Cercle complet | 360 flip |
+| Arc de 225° par la droite, sortie haut-gauche | Varial flip |
+| Arc de 225° par la gauche, sortie haut-droite | Hardflip |
+
+Un trait coupe le disque intérieur du stick, un arc reste sur le bord : c'est le rayon minimal du chemin qui sépare les deux familles. `FLICK.sensitivity` élargit ou resserre toutes les tolérances.
 
 ## Arborescence
 
@@ -52,7 +69,8 @@ src/
     Game.ts             assemble les sous-systèmes, fixedUpdate / render
     GameLoop.ts         boucle à pas fixe avec accumulateur et stats
     Renderer.ts         WebGLRenderer, pixel ratio plafonné, resize
-    Input.ts            actions abstraites, sources d'input enfichables (clavier, manette)
+    Input.ts            actions abstraites, sources d'input enfichables (clavier, souris, manette)
+    FlickRecognizer.ts  analyse du geste du stick droit, événement de trick normalisé
     CameraRig.ts        caméra troisième personne : amortissement, FOV selon la vitesse, collision, anticipation de réception
   physics/
     PhysicsWorld.ts     chargement WASM, monde Rapier, colliders statiques et matériaux, rayons
@@ -62,6 +80,7 @@ src/
     skaterStates.ts     états idle, pushing, riding, braking, popCharge, pop, air, landing
     StateMachine.ts     machine à états générique
     states.ts           identifiants de tous les états prévus
+    tricks.ts           définitions des tricks : tours de flip et de shove, noms
     SkaterRig.ts        interface du visuel animable et pose d'animation
     ProceduralSkaterRig.ts skateur en primitives (planche, 4 roues, rider à IK)
     SkaterVisual.ts     relie simulation et rig, interpole la pose d'animation
@@ -74,6 +93,7 @@ src/
   ui/
     DebugOverlay.ts     FPS, temps de frame, pas physiques, draw calls, état du skateur
     PauseOverlay.ts     voile de pause
+    FlickDebugPanel.ts  debug du flick : stick, chemin du geste, mesures, trick et scores
   audio/
     AudioEngine.ts      contexte Web Audio déverrouillé au premier geste, bus master
     sfx.ts              sons synthétisés : pop du tail, claque de réception
@@ -83,7 +103,8 @@ src/
 
 - **Pas fixe** : la physique et toute la logique de gameplay avancent par pas de `FIXED_DT` (120 Hz) dans `Game.fixedUpdate`. `GameLoop` borne le delta de frame (`SIMULATION.maxFrameDelta`) et le nombre de pas rattrapés par frame (`SIMULATION.maxStepsPerFrame`).
 - **Rendu interpolé** : chaque corps visible passe par `InterpolatedBody`. `capture()` après chaque pas physique, `apply(alpha)` dans `render`. Après une téléportation, appeler `teleportSync()`.
-- **Input** : le gameplay lit un `InputSnapshot` (sticks `move` et `flick`, boutons `held` et `pressed`) produit une fois par pas fixe par `Input.poll()`. Le gameplay ne lit jamais une touche ou un pointeur directement. Les contrôles tactiles (étape 9) et la manette seront de nouvelles `InputSource`.
+- **Input** : le gameplay lit un `InputSnapshot` (sticks `move` et `flick`, boutons `held` et `pressed`, geste `gesture`) produit une fois par pas fixe par `Input.poll()`. Le gameplay ne lit jamais une touche ou un pointeur directement. Chaque périphérique est une `InputSource` qui écrit dans les sticks ; les contrôles tactiles (étape 9) en seront une de plus.
+- **Flick** : `FlickRecognizer` tourne dans `Input.poll()` sur le stick droit normalisé, donc indépendamment du périphérique. Phases `idle`, `charging` (stick en bas), `flicking`, puis fin au relâchement, à l'immobilité (`FLICK.holdEndMs`) ou au délai max. Il mesure angle de départ (direction moyenne de la charge), angle de sortie, angle balayé, rayon minimal (trait ou arc), amplitude et durée, puis note chaque modèle par des gaussiennes sur ces écarts. Il publie un `FlickEvent` (trick, score, sens, mesures, candidats) dans `gesture.event`.
 - **Assets** : tout visuel est demandé à un `AssetProvider` par identifiant (`AssetId`). L'implémentation actuelle est `ProceduralAssets`. Pour passer aux modèles glTF, écrire une `GltfAssets` qui implémente la même interface et la passer à `Game` dans `main.ts`. Le gameplay ne crée jamais de mesh lui-même.
 - **Audio** : les voix se branchent sur `AudioEngine.output`. Même principe que les assets pour remplacer plus tard la synthèse par des samples.
 - **Skateur** : chaque état implémente `State<SkaterStateId, Skater>` et renvoie l'état suivant depuis `update`. Les états écrivent des intentions (`pushAccel`, `brake`, `lean`) ; `Skater.step` les intègre. Les transitions ne se font qu'à pas fixe.
@@ -95,10 +116,11 @@ src/
   - un choc rasant (`GROUND.wallDeflectAngle`) redresse la planche le long du mur.
 - **Ollie** : `popCharge` accumule la charge (linéaire jusqu'à `POP.chargeTime`), `pop` attend `POP.popDelay` puis `performPop` ajoute `√(2·g·h)` le long de la normale du sol, h interpolé entre `POP.minHeight` et `POP.maxHeight`. La vitesse tangentielle est conservée. Coyote time (`INPUT.coyoteMs`) si la planche quitte une arête pendant la charge, buffer (`INPUT.popBufferMs`) pour un tap juste avant la réception.
 - **En l'air** : seule la gravité agit, la vitesse horizontale est conservée exactement. Le corps tourne au stick gauche avec inertie (`POP.airSpinRate`, `POP.airSpinResponse`). La trajectoire balistique est prédite par segments de rayons (`Skater.prediction`) ; la planche s'aligne sur la normale de réception prévue (`POP.airAlignRate`) et la caméra s'en sert.
+- **Tricks** : `performPop` démarre le trick du dernier `FlickEvent` (`Skater.trick`). La rotation du board dure `TRICKS.rotationAirFraction` du temps de vol prévu, bornée par `minRotationTime` et `maxRotationTime` : plus le saut est haut, plus la rotation est lente. La progression est adoucie (`trickEase`), les pieds quittent le board puis le rattrapent sur `TRICKS.catchFraction`. À la réception, la rotation restante (`boardResidual`) dégrade la qualité au-delà de `TRICKS.landFlipTolerance` (sale) et du double (hors limites), et le board raté reste de travers un instant avant de se recaler.
 - **Réception** : `tryLand` mesure l'angle planche / surface (`tilt`), l'écart entre l'axe de la planche et la vitesse (`yawError`, fakie accepté) et la vitesse d'impact. Qualité `clean`, `sloppy` (seuils `LANDING`) ou `bail` (seuils `BAIL`, en attendant les chutes de l'étape 6), avec perte de vitesse et temps de récupération (état `landing`). Une surface plus inclinée que `GROUND.maxLandingSurfaceAngle` n'accepte jamais de réception. Les effets (son, poussière, affaissement caméra) passent par `Skater.events`.
 - **Modules de skatepark** : un profil 2D extrudé donne le visuel, sa décomposition convexe donne les colliders (`ColliderDesc.convexHull`). Les colonnes adjacentes partagent leurs arêtes exactement, ce qui évite les accrocs aux raccords.
 - **Caméra** : les requêtes de collision passent par un callback fourni par `Game`, `CameraRig` ne dépend pas de Rapier. Rapprochement immédiat quand le décor bouche la vue, recul amorti. En l'air, le suivi vertical se relâche et glisse vers l'altitude de réception prévue (`CAMERA.landingLead`, `landingAnticipation`) ; à l'impact, affaissement proportionnel à la vitesse.
-- **Animation** : `SkaterPose` porte des temps (`popTime`, `landTime`, `airTime`) plutôt que des angles ; chaque rig en tire ses propres courbes. Le rig procédural fait pivoter la planche autour des roues arrière (nose qui se lève puis nivelage) et place les pieds sur le deck incliné par IK.
+- **Animation** : `SkaterPose` porte des temps (`popTime`, `landTime`, `airTime`) plutôt que des angles ; chaque rig en tire ses propres courbes. Le rig procédural fait pivoter la planche autour des roues arrière (nose qui se lève puis nivelage), applique les rotations de trick autour du centre du deck (shove sur l'axe vertical, puis flip sur l'axe long) et place les pieds sur le deck par IK, décollés pendant la rotation (`feetLift`).
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
 ## Conventions de code
@@ -119,7 +141,7 @@ src/
 - [x] 0. Initialisation : stack, arborescence, boucle à pas fixe 120 Hz, rendu interpolé, compteur FPS de debug, config centralisée
 - [x] 1. Scène, poussée, caméra : skatepark de test, skateur en primitives, machine à états (idle, pousse, roule, freine, air), carve à l'inclinaison, caméra amortie avec collision
 - [x] 2. Ollie : charge et pop, contrôle aérien, prédiction de trajectoire, évaluation de réception, caméra d'anticipation, poussière, sons synthétisés ; parc : marche, petit gap, petit quarter pipe, escalier avec main courante
-- [ ] 3. Flicks et flips
+- [x] 3. Flicks et flips : stick droit à la souris et aux flèches, reconnaissance de gestes (ollie, kickflip, heelflip, pop shove-it, 360 flip, varial flip, hardflip), rotation du board liée à la hauteur, rattrapage par les pieds, réception évaluée sur la rotation restante, panneau de debug du geste
 - [ ] 4. Grabs
 - [ ] 5. Grinds et manuals
 - [ ] 6. Bails

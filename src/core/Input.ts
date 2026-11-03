@@ -1,4 +1,5 @@
-import { INPUT } from '@/config/physics';
+import { FIXED_DT, INPUT } from '@/config/physics';
+import { FlickRecognizer, type GestureSnapshot } from './FlickRecognizer';
 
 /**
  * Actions de jeu abstraites. Le gameplay ne lit jamais une touche directement :
@@ -12,8 +13,10 @@ export interface InputSnapshot {
    * ou l'arrière (frein), dans [-1, 1].
    */
   move: { x: number; y: number };
-  /** Stick droit : flick de la planche (style Skate). */
+  /** Stick droit : les pieds du skateur. x vers la droite, y vers le haut, dans [-1, 1]. */
   flick: { x: number; y: number };
+  /** Geste du stick droit analysé par FlickRecognizer, quel que soit le périphérique. */
+  gesture: GestureSnapshot;
   /** Boutons maintenus. */
   held: ReadonlySet<ButtonAction>;
   /** Boutons pressés depuis le pas fixe précédent. */
@@ -47,9 +50,14 @@ const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
   Escape: 'pause',
 };
 
-/** Clavier : ZQSD/WASD et flèches pour le stick gauche. Le stick droit (flick) sera lié à l'étape 3. */
+/**
+ * Clavier : ZQSD/WASD pour le stick gauche, flèches pour le stick droit en repli.
+ * Les flèches donnent une cible ; le stick y glisse avec INPUT.keyStickResponse, ce qui
+ * transforme une suite de flèches en trajectoire continue (trait ou arc).
+ */
 export class KeyboardSource implements InputSource {
   private readonly down = new Set<string>();
+  private readonly stick = { x: 0, y: 0 };
   /** Touches enfoncées depuis le dernier sample, conservées même si déjà relâchées (tap court). */
   private readonly tapped = new Set<string>();
 
@@ -61,8 +69,35 @@ export class KeyboardSource implements InputSource {
 
   sample(s: MutableSnapshot): void {
     const axis = (neg: string, pos: string) => (this.down.has(pos) ? 1 : 0) - (this.down.has(neg) ? 1 : 0);
-    s.move.x += clampUnit(axis('KeyA', 'KeyD') + axis('ArrowLeft', 'ArrowRight'));
-    s.move.y += clampUnit(axis('KeyS', 'KeyW') + axis('ArrowDown', 'ArrowUp'));
+    s.move.x += axis('KeyA', 'KeyD');
+    s.move.y += axis('KeyS', 'KeyW');
+    let tx = axis('ArrowLeft', 'ArrowRight');
+    let ty = axis('ArrowDown', 'ArrowUp');
+    const len = Math.hypot(tx, ty);
+    if (len > 1) {
+      tx /= len;
+      ty /= len;
+    }
+    const k = 1 - Math.exp(-INPUT.keyStickResponse * FIXED_DT);
+    const cr = Math.hypot(this.stick.x, this.stick.y);
+    const tr = Math.hypot(tx, ty);
+    let turn = Infinity;
+    if (cr > INPUT.keyStickArcMinRadius && tr > 0.5) {
+      turn = Math.atan2(ty, tx) - Math.atan2(this.stick.y, this.stick.x);
+      turn = Math.atan2(Math.sin(turn), Math.cos(turn));
+    }
+    if (Math.abs(turn) <= INPUT.keyStickArcMaxAngle) {
+      // Directions voisines : on tourne le long du bord (arc).
+      const a = Math.atan2(this.stick.y, this.stick.x) + turn * k;
+      const r = cr + (tr - cr) * k;
+      this.stick.x = Math.cos(a) * r;
+      this.stick.y = Math.sin(a) * r;
+    } else {
+      this.stick.x += (tx - this.stick.x) * k;
+      this.stick.y += (ty - this.stick.y) * k;
+    }
+    s.flick.x = clampUnit(s.flick.x + this.stick.x);
+    s.flick.y = clampUnit(s.flick.y + this.stick.y);
     for (const code of this.down) this.addAction(s, code);
     for (const code of this.tapped) this.addAction(s, code);
     this.tapped.clear();
@@ -87,12 +122,89 @@ export class KeyboardSource implements InputSource {
   private readonly onBlur = (): void => {
     this.down.clear();
     this.tapped.clear();
+    this.stick.x = this.stick.y = 0;
   };
 
   dispose(): void {
     this.target.removeEventListener('keydown', this.onDown);
     this.target.removeEventListener('keyup', this.onUp);
     this.target.removeEventListener('blur', this.onBlur);
+  }
+}
+
+/**
+ * Souris : glisser bouton gauche maintenu déplace le stick droit autour du point d'appui.
+ * Un glissé de INPUT.mouseStickRadiusPx met le stick en butée ; au-delà de mouseOriginFollow fois
+ * ce rayon, l'origine suit la souris pour qu'un retour en arrière réponde sans course morte.
+ * Relâcher le bouton ramène le stick au centre.
+ */
+export class MouseFlickSource implements InputSource {
+  private active = false;
+  private pointerId = -1;
+  private originX = 0;
+  private originY = 0;
+  private readonly stick = { x: 0, y: 0 };
+
+  constructor(private readonly element: HTMLElement) {
+    element.addEventListener('pointerdown', this.onDown);
+    element.addEventListener('pointermove', this.onMove);
+    element.addEventListener('pointerup', this.onUp);
+    element.addEventListener('pointercancel', this.onUp);
+    element.addEventListener('contextmenu', this.onContextMenu);
+  }
+
+  sample(s: MutableSnapshot): void {
+    if (!this.active) return;
+    s.flick.x = clampUnit(s.flick.x + this.stick.x);
+    s.flick.y = clampUnit(s.flick.y + this.stick.y);
+  }
+
+  private readonly onDown = (e: PointerEvent): void => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    this.active = true;
+    this.pointerId = e.pointerId;
+    this.originX = e.clientX;
+    this.originY = e.clientY;
+    this.stick.x = this.stick.y = 0;
+    this.element.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+
+  private readonly onMove = (e: PointerEvent): void => {
+    if (!this.active || e.pointerId !== this.pointerId) return;
+    const radius = INPUT.mouseStickRadiusPx;
+    let dx = e.clientX - this.originX;
+    let dy = e.clientY - this.originY;
+    const len = Math.hypot(dx, dy);
+    const follow = radius * INPUT.mouseOriginFollow;
+    if (len > follow) {
+      // L'origine glisse vers la souris : la course au-delà de la butée reste bornée.
+      this.originX += (dx * (len - follow)) / len;
+      this.originY += (dy * (len - follow)) / len;
+      dx = e.clientX - this.originX;
+      dy = e.clientY - this.originY;
+    }
+    const r = Math.min(1, Math.hypot(dx, dy) / radius);
+    const d = Math.hypot(dx, dy) || 1;
+    this.stick.x = (dx / d) * r;
+    this.stick.y = (-dy / d) * r;
+  };
+
+  private readonly onUp = (e: PointerEvent): void => {
+    if (e.pointerId !== this.pointerId) return;
+    this.active = false;
+    this.pointerId = -1;
+    this.stick.x = this.stick.y = 0;
+  };
+
+  private readonly onContextMenu = (e: Event): void => e.preventDefault();
+
+  dispose(): void {
+    this.element.removeEventListener('pointerdown', this.onDown);
+    this.element.removeEventListener('pointermove', this.onMove);
+    this.element.removeEventListener('pointerup', this.onUp);
+    this.element.removeEventListener('pointercancel', this.onUp);
+    this.element.removeEventListener('contextmenu', this.onContextMenu);
   }
 }
 
@@ -123,14 +235,16 @@ export class GamepadSource implements InputSource {
   dispose(): void {}
 }
 
-/** Agrège les sources et produit un snapshot par pas fixe. */
+/** Agrège les sources, analyse le geste du stick droit et produit un snapshot par pas fixe. */
 export class Input {
+  readonly flickRecognizer = new FlickRecognizer();
   private readonly sources: InputSource[] = [];
   private readonly previousHeld = new Set<ButtonAction>();
   private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, held: new Set() };
   private readonly snapshot: InputSnapshot = {
     move: { x: 0, y: 0 },
     flick: { x: 0, y: 0 },
+    gesture: this.flickRecognizer.snapshot,
     held: new Set(),
     pressed: new Set(),
   };
@@ -152,6 +266,7 @@ export class Input {
 
     applyStick(b.move, this.snapshot.move);
     applyStick(b.flick, this.snapshot.flick);
+    this.flickRecognizer.update(this.snapshot.flick.x, this.snapshot.flick.y);
     const held = this.snapshot.held as Set<ButtonAction>;
     held.clear();
     for (const a of b.held) held.add(a);
