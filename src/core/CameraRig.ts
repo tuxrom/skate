@@ -17,6 +17,12 @@ export interface CameraTarget {
   forward: THREE.Vector3;
   /** Vitesse (m/s), pour le FOV. */
   speed: number;
+  airborne: boolean;
+  /** Réception prévue (valide seulement en l'air). */
+  landingValid: boolean;
+  landingPoint: THREE.Vector3;
+  /** Temps avant la réception prévue (s). */
+  landingTime: number;
 }
 
 /**
@@ -34,6 +40,10 @@ export class CameraRig {
   private readonly offset = new THREE.Vector3();
   private readonly dir = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
+  private readonly look = new THREE.Vector3();
+  /** Point visé lissé, décalé vers la réception prévue. */
+  private lookBlend = 0;
+  private dip = 0;
 
   constructor(private readonly clearance: ClearanceQuery | null = null) {
     this.camera = new THREE.PerspectiveCamera(CAMERA.fovMin, 1, CAMERA.near, CAMERA.far);
@@ -49,6 +59,8 @@ export class CameraRig {
     this.yaw = this.targetYaw(target.forward, 0);
     this.anchor.copy(target.position);
     this.distance = CAMERA.followDistance;
+    this.lookBlend = 0;
+    this.dip = 0;
     this.camera.fov = CAMERA.fovMin;
     this.camera.updateProjectionMatrix();
     this.place(0, true);
@@ -58,11 +70,23 @@ export class CameraRig {
     this.yaw = dampAngle(this.yaw, this.targetYaw(target.forward, this.yaw), CAMERA.yawStiffness, dt);
 
     // Ancre : suivi horizontal et vertical avec des raideurs différentes.
+    // En l'air, le suivi vertical se relâche et anticipe l'altitude de réception.
     const kh = 1 - Math.exp(-CAMERA.positionStiffness * dt);
-    const kv = 1 - Math.exp(-CAMERA.heightStiffness * dt);
     this.anchor.x += (target.position.x - this.anchor.x) * kh;
     this.anchor.z += (target.position.z - this.anchor.z) * kh;
-    this.anchor.y += (target.position.y - this.anchor.y) * kv;
+    let targetY = target.position.y;
+    let lookGoal = 0;
+    if (target.airborne && target.landingValid) {
+      const lead = 1 - Math.min(1, target.landingTime / CAMERA.landingLead);
+      const anticipation = lead * CAMERA.landingAnticipation;
+      targetY += (target.landingPoint.y - target.position.y) * anticipation;
+      lookGoal = lead * CAMERA.landingLookBlend;
+      this.look.copy(target.landingPoint);
+    }
+    const kv = 1 - Math.exp(-(target.airborne ? CAMERA.airHeightStiffness : CAMERA.heightStiffness) * dt);
+    this.anchor.y += (targetY - this.anchor.y) * kv;
+    this.lookBlend += (lookGoal - this.lookBlend) * (1 - Math.exp(-CAMERA.heightStiffness * dt));
+    this.dip *= Math.exp(-CAMERA.impactDipRecovery * dt);
 
     const speedRatio = Math.min(1, target.speed / SKATING.maxSpeed);
     const fov = CAMERA.fovMin + (CAMERA.fovMax - CAMERA.fovMin) * speedRatio * speedRatio * (3 - 2 * speedRatio);
@@ -75,8 +99,13 @@ export class CameraRig {
     this.place(dt, false);
   }
 
+  /** Affaissement bref à la réception, proportionnel à la vitesse d'impact. */
+  impact(speed: number): void {
+    this.dip = Math.min(CAMERA.impactDipMax, this.dip + speed * CAMERA.impactDipPerSpeed);
+  }
+
   private place(dt: number, instant: boolean): void {
-    this.lookAt.copy(this.anchor).addScaledVector(UP, CAMERA.lookHeight);
+    this.lookAt.copy(this.anchor).addScaledVector(UP, CAMERA.lookHeight - this.dip);
     this.offset.set(0, CAMERA.followHeight - CAMERA.lookHeight, CAMERA.followDistance).applyAxisAngle(UP, this.yaw);
     const fullLength = this.offset.length();
     this.dir.copy(this.offset).divideScalar(fullLength);
@@ -90,9 +119,14 @@ export class CameraRig {
 
     this.desired.copy(this.lookAt).addScaledVector(this.dir, this.distance);
     this.camera.position.copy(this.desired);
-    // Le point visé avance dans le sens du cap pour voir où l'on va.
+    // Le point visé avance dans le sens du cap, et glisse vers la réception prévue en fin de saut.
     this.offset.set(0, 0, -CAMERA.lookAhead).applyAxisAngle(UP, this.yaw);
-    this.camera.lookAt(this.lookAt.add(this.offset));
+    this.lookAt.add(this.offset);
+    if (this.lookBlend > 1e-3) {
+      this.offset.copy(this.look).addScaledVector(UP, CAMERA.lookHeight * 0.5);
+      this.lookAt.lerp(this.offset, this.lookBlend);
+    }
+    this.camera.lookAt(this.lookAt);
   }
 
   /** Cap visé : derrière le skateur. Garde le cap courant si la planche est presque verticale. */

@@ -4,7 +4,7 @@ import { INPUT } from '@/config/physics';
  * Actions de jeu abstraites. Le gameplay ne lit jamais une touche directement :
  * il lit des actions, quelle que soit la source (clavier, manette, tactile).
  */
-export type ButtonAction = 'push' | 'boost' | 'reset' | 'debug' | 'pause';
+export type ButtonAction = 'push' | 'ollie' | 'reset' | 'debug' | 'pause';
 
 export interface InputSnapshot {
   /**
@@ -38,9 +38,9 @@ export interface MutableSnapshot {
  * et en QWERTY. KeyW/KeyA/KeyS/KeyD correspondent à Z/Q/S/D sur un clavier AZERTY.
  */
 const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
-  Space: 'push',
-  ShiftLeft: 'boost',
-  ShiftRight: 'boost',
+  Space: 'ollie',
+  ShiftLeft: 'push',
+  ShiftRight: 'push',
   KeyR: 'reset',
   F3: 'debug',
   Backquote: 'debug',
@@ -94,6 +94,33 @@ export class KeyboardSource implements InputSource {
     this.target.removeEventListener('keyup', this.onUp);
     this.target.removeEventListener('blur', this.onBlur);
   }
+}
+
+/** Boutons de la disposition standard des manettes (Gamepad API, mapping « standard »). */
+const PAD_BUTTONS: ReadonlyArray<readonly [number, ButtonAction]> = [
+  [0, 'push'], // A / Croix
+  [8, 'reset'], // Select / Share
+  [9, 'pause'], // Start / Options
+];
+
+/**
+ * Manette : stick gauche pour la direction, stick droit pour le flick (ollie : bas puis haut).
+ * Lit toutes les manettes branchées ; la zone morte est appliquée par Input.
+ */
+export class GamepadSource implements InputSource {
+  sample(s: MutableSnapshot): void {
+    if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
+    for (const pad of navigator.getGamepads()) {
+      if (!pad || !pad.connected || pad.axes.length < 4) continue;
+      s.move.x = clampUnit(s.move.x + (pad.axes[0] ?? 0));
+      s.move.y = clampUnit(s.move.y - (pad.axes[1] ?? 0));
+      s.flick.x = clampUnit(s.flick.x + (pad.axes[2] ?? 0));
+      s.flick.y = clampUnit(s.flick.y - (pad.axes[3] ?? 0));
+      for (const [index, action] of PAD_BUTTONS) if (pad.buttons[index]?.pressed) s.held.add(action);
+    }
+  }
+
+  dispose(): void {}
 }
 
 /** Agrège les sources et produit un snapshot par pas fixe. */

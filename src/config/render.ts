@@ -50,6 +50,46 @@ export const CAMERA = {
   minDistance: 0.6,
   /** Vitesse de recul quand le décor ne gêne plus (1/s). Le rapprochement, lui, est immédiat. */
   releaseStiffness: 2.5,
+  /** Raideur du suivi vertical en l'air (1/s) : la caméra ne suit pas tout l'apex. */
+  airHeightStiffness: 3.5,
+  /**
+   * Anticipation de la réception (s) : dans cette fenêtre avant l'impact, l'ancre verticale
+   * glisse vers l'altitude du point d'atterrissage prévu.
+   */
+  landingLead: 1.0,
+  /** Part maximale du chemin vers l'altitude de réception parcourue par anticipation (0 à 1). */
+  landingAnticipation: 0.85,
+  /** Le regard se porte vers le point de réception, part maximale (0 à 1). */
+  landingLookBlend: 0.35,
+  /** Affaissement de la caméra à l'impact, par m/s de vitesse d'impact (m). */
+  impactDipPerSpeed: 0.035,
+  /** Affaissement maximal (m). */
+  impactDipMax: 0.25,
+  /** Retour après l'affaissement (1/s). */
+  impactDipRecovery: 7,
+} as const;
+
+/** Effets visuels. */
+export const FX = {
+  /** Nombre maximal de particules de poussière vivantes. */
+  dustPoolSize: 160,
+  /** Durée de vie d'une particule (s). */
+  dustLifetime: 0.75,
+  /** Taille d'une particule à la naissance (m). */
+  dustSize: 0.16,
+  /** Grossissement d'une particule au cours de sa vie (multiplicateur final). */
+  dustGrowth: 2.6,
+  /** Vitesse d'éjection horizontale (m/s). */
+  dustSpeed: 1.4,
+  /** Particules émises par m/s de vitesse d'impact. */
+  dustPerImpactSpeed: 5,
+  /** Particules émises au pop. */
+  dustOnPop: 6,
+  /** Plafond d'une seule bouffée. */
+  dustMaxBurst: 40,
+  dustColor: 0xc9c2b4,
+  /** Opacité à la naissance. */
+  dustOpacity: 0.55,
 } as const;
 
 export const DEBUG = {

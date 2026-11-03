@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
-import { BODY, GROUND, INPUT, MATERIALS, SKATING, WORLD, type SurfaceMaterial } from '@/config/physics';
+import { BAIL, BODY, GROUND, INPUT, LANDING, MATERIALS, POP, SKATING, WORLD, type SurfaceMaterial } from '@/config/physics';
 import type { PhysicsWorld, RayHit } from '@/physics/PhysicsWorld';
 import type { PoseSource } from '@/physics/InterpolatedBody';
 import type { InputSnapshot } from '@/core/Input';
@@ -18,6 +18,46 @@ const CAPSULE_CENTER = BODY.capsuleClearance + BODY.capsuleRadius + BODY.capsule
 const HALF_BOARD = BODY.boardLength / 2;
 const HALF_WIDTH = BODY.boardWidth / 2;
 const HALF_WHEELBASE = BODY.wheelbase / 2;
+
+const MAX_LANDING_COS_UP = Math.cos(GROUND.maxLandingAngle);
+const COS_LANDING_SURFACE = Math.cos(GROUND.maxLandingSurfaceAngle);
+
+/** Qualité d'une réception. 'bail' dépasse les seuils de chute ; les chutes arrivent à l'étape 6. */
+export type LandingQuality = 'clean' | 'sloppy' | 'bail';
+
+export interface LandingInfo {
+  quality: LandingQuality;
+  /** Vitesse le long de la normale au moment de l'impact (m/s). */
+  impactSpeed: number;
+  /** Angle entre la planche et la surface (rad). */
+  tilt: number;
+  /** Écart entre l'axe de la planche et la vitesse (rad), fakie compris. */
+  yawError: number;
+  airTime: number;
+  /** Hauteur max atteinte au-dessus du point de décollage (m). */
+  peakHeight: number;
+  /** Vrai si le vol a commencé par un pop. */
+  popped: boolean;
+  readonly position: THREE.Vector3;
+  readonly normal: THREE.Vector3;
+}
+
+/** Écouteurs des événements ponctuels du skateur (son, particules, caméra). */
+export interface SkaterEvents {
+  pop?(charge: number, position: THREE.Vector3): void;
+  land?(info: LandingInfo): void;
+}
+
+/** Point de réception prévu par la trajectoire balistique. */
+export interface LandingPrediction {
+  valid: boolean;
+  readonly point: THREE.Vector3;
+  readonly normal: THREE.Vector3;
+  /** Temps avant l'impact (s). */
+  time: number;
+}
+
+type ChargeSource = 'button' | 'stick';
 
 const EMPTY_INPUT: InputSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, held: new Set(), pressed: new Set() };
 
@@ -68,6 +108,47 @@ export class Skater implements PoseSource {
   pushQueuedUntil = -1;
   /** Temps de simulation écoulé (s). */
   time = 0;
+  /** Nombre de poussées enchaînées sans relâcher la touche. */
+  pushChain = 0;
+
+  // Ollie.
+  /** Charge de l'ollie (0 à 1). */
+  charge = 0;
+  private chargeSource: ChargeSource | null = null;
+  /** Temps passé hors de la zone basse du stick pendant une charge au stick (s). */
+  private stickOutTimer = 0;
+  /** Temps écoulé dans l'état pop (s). */
+  popTimer = 0;
+  /** Temps depuis le début du pop, pour l'animation (s), -1 sinon. */
+  popTime = -1;
+  /** Charge conservée en quittant le sol pendant la charge (coyote time), -1 sinon. */
+  coyoteCharge = -1;
+  /** Instant du dernier appui d'ollie, pour le buffer de réception (s). */
+  private lastOllieTap = -Infinity;
+  private airYawRate = 0;
+  private takeoffY = 0;
+  private peakY = 0;
+  private popped = false;
+  private predictionCountdown = 0;
+
+  // Réception.
+  /** Temps depuis la dernière réception évaluée (s), -1 sinon. */
+  landTime = -1;
+  /** Temps de récupération restant après une réception (s). */
+  recovery = 0;
+  readonly lastLanding: LandingInfo = {
+    quality: 'clean',
+    impactSpeed: 0,
+    tilt: 0,
+    yawError: 0,
+    airTime: 0,
+    peakHeight: 0,
+    popped: false,
+    position: new THREE.Vector3(),
+    normal: new THREE.Vector3(0, 1, 0),
+  };
+  readonly prediction: LandingPrediction = { valid: false, point: new THREE.Vector3(), normal: new THREE.Vector3(0, 1, 0), time: 0 };
+  events: SkaterEvents = {};
 
   input: InputSnapshot = EMPTY_INPUT;
   readonly fsm: StateMachine<SkaterStateId, Skater>;
@@ -90,6 +171,9 @@ export class Skater implements PoseSource {
   private readonly rayOrigin = { x: 0, y: 0, z: 0 };
   private readonly rayDir = { x: 0, y: 0, z: 0 };
   private readonly desired = { x: 0, y: 0, z: 0 };
+  private readonly predPos = new THREE.Vector3();
+  private readonly predVel = new THREE.Vector3();
+  private readonly predNext = new THREE.Vector3();
 
   constructor(private readonly physics: PhysicsWorld) {
     const R = physics.rapier;
@@ -135,6 +219,14 @@ export class Skater implements PoseSource {
     this.pushPhase = -1;
     this.brake = 0;
     this.airTime = 0;
+    this.charge = 0;
+    this.chargeSource = null;
+    this.popTime = -1;
+    this.coyoteCharge = -1;
+    this.landTime = -1;
+    this.recovery = 0;
+    this.airYawRate = 0;
+    this.prediction.valid = false;
     this.grounded = this.probeGround(GROUND.probeHeight + 2) !== null;
     if (this.grounded) this.applyContact(this.contact);
     this.syncCollider();
@@ -148,14 +240,106 @@ export class Skater implements PoseSource {
     return this.input.move.y < -INPUT.brakeThreshold;
   }
 
+  /** Poussées enchaînées en maintenant la touche : plus fortes et plus rapides. */
   boostHeld(): boolean {
-    return this.input.held.has('boost');
+    return this.pushChain > 0 && this.input.held.has('push');
   }
 
-  /** Vrai si le joueur demande une poussée (appui, maintien, Shift, ou poussée mémorisée). */
+  /** Vrai si le joueur demande une poussée (appui, maintien, ou poussée mémorisée). */
   pushRequested(): boolean {
     const i = this.input;
-    return i.pressed.has('push') || i.held.has('push') || i.held.has('boost') || this.time < this.pushQueuedUntil;
+    return i.pressed.has('push') || i.held.has('push') || this.time < this.pushQueuedUntil;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ollie : charge, relâchement, pop.
+
+  /**
+   * Demande de début de charge : bouton d'ollie appuyé ou maintenu, ou stick droit vers le bas.
+   * Un tap fait juste avant la réception compte aussi (buffer).
+   */
+  ollieStartRequested(): ChargeSource | 'buffered' | null {
+    const i = this.input;
+    if (i.pressed.has('ollie') || i.held.has('ollie')) return 'button';
+    if (i.flick.y < -INPUT.ollieStickDown) return 'stick';
+    if (this.time - this.lastOllieTap < INPUT.popBufferMs / 1000) return 'buffered';
+    return null;
+  }
+
+  startCharge(source: ChargeSource): void {
+    this.chargeSource = source;
+    this.charge = 0;
+    this.stickOutTimer = 0;
+    this.lastOllieTap = -Infinity;
+  }
+
+  /** Fait monter la charge, linéaire jusqu'à POP.chargeTime. */
+  updateCharge(dt: number): void {
+    this.charge = Math.min(1, this.charge + dt / POP.chargeTime);
+  }
+
+  /**
+   * Fin de charge : 'pop' au relâchement du bouton ou au flick vers le haut,
+   * 'cancel' si le stick revient au centre sans flick dans la fenêtre.
+   */
+  ollieReleaseRequested(dt: number): 'pop' | 'cancel' | null {
+    const i = this.input;
+    if (this.chargeSource === 'button') return i.held.has('ollie') ? null : 'pop';
+    if (i.flick.y > INPUT.ollieStickUp) return 'pop';
+    if (i.flick.y < -INPUT.ollieStickDown) {
+      this.stickOutTimer = 0;
+      return null;
+    }
+    this.stickOutTimer += dt;
+    return this.stickOutTimer * 1000 > INPUT.flickWindowMs ? 'cancel' : null;
+  }
+
+  cancelCharge(): void {
+    this.charge = 0;
+    this.chargeSource = null;
+  }
+
+  /** Vitesse verticale d'un pop pour une charge donnée : √(2·g·h), h linéaire en charge. */
+  static popSpeed(charge: number): number {
+    const h = lerp(POP.minHeight, POP.maxHeight, clamp01(charge));
+    return Math.sqrt(2 * -WORLD.gravity * h);
+  }
+
+  /** Décollage : la vitesse tangentielle est conservée, le pop s'ajoute le long de la normale. */
+  performPop(charge: number): void {
+    const v = this.velocity;
+    const n = this.up;
+    const vn = v.dot(n);
+    v.addScaledVector(n, -vn).multiplyScalar(POP.takeoffSpeedRetention);
+    v.addScaledVector(n, Math.max(0, vn) + Skater.popSpeed(charge));
+    this.grounded = false;
+    this.airTime = 0;
+    this.popped = true;
+    this.takeoffY = this.peakY = this.position.y;
+    this.airYawRate = 0;
+    this.charge = 0;
+    this.chargeSource = null;
+    this.coyoteCharge = -1;
+    this.predictionCountdown = 0;
+    if (this.popTime < 0 || this.popTime < POP.popDelay) this.popTime = POP.popDelay;
+    this.events.pop?.(charge, this.position);
+  }
+
+  /** En l'air juste après une arête : le relâchement de la charge déclenche encore le pop. */
+  tryCoyotePop(): boolean {
+    if (this.coyoteCharge < 0) return false;
+    if (this.airTime * 1000 > INPUT.coyoteMs) {
+      this.coyoteCharge = -1;
+      this.chargeSource = null;
+      return false;
+    }
+    const release = this.chargeSource === 'button' ? !this.input.held.has('ollie') : this.input.flick.y > INPUT.ollieStickUp;
+    if (!release) return false;
+    // Le pop part de la vitesse actuelle : on annule la chute déjà acquise.
+    const vy = this.velocity.dot(this.up);
+    if (vy < 0) this.velocity.addScaledVector(this.up, -vy);
+    this.performPop(this.coyoteCharge);
+    return true;
   }
 
   updateLean(dt: number): void {
@@ -169,6 +353,10 @@ export class Skater implements PoseSource {
   step(dt: number, input: InputSnapshot): void {
     this.input = input;
     this.time += dt;
+    if (input.pressed.has('ollie')) this.lastOllieTap = this.time;
+    if (this.popTime >= 0) this.popTime = this.popTime > 2 ? -1 : this.popTime + dt;
+    if (this.landTime >= 0) this.landTime = this.landTime > 2 ? -1 : this.landTime + dt;
+    if (this.recovery > 0) this.recovery = Math.max(0, this.recovery - dt);
     this.tuck = input.move.y > INPUT.tuckThreshold;
     this.fsm.update(dt);
 
@@ -226,22 +414,33 @@ export class Skater implements PoseSource {
     this.followGround();
   }
 
+  /**
+   * En l'air : la vitesse horizontale est conservée exactement, seule la gravité agit.
+   * Le corps tourne légèrement (avec inertie) et la planche s'aligne sur la surface de réception prévue.
+   */
   private airStep(dt: number): void {
     const v = this.velocity;
     this.airTime += dt;
     v.addScaledVector(GRAVITY, dt);
-    const s = v.length();
-    if (s > 0) v.multiplyScalar(Math.max(0, s - SKATING.airDrag * s * s * dt) / s);
 
-    // Rotation de cap à l'inclinaison, puis retour progressif vers la verticale.
-    this.tmpQ.setFromAxisAngle(this.up, -(this.lean / SKATING.leanMax) * SKATING.airTurnRate * dt);
+    const target = -this.input.move.x * POP.airSpinRate;
+    this.airYawRate += (target - this.airYawRate) * (1 - Math.exp(-POP.airSpinResponse * dt));
+    this.tmpQ.setFromAxisAngle(this.up, this.airYawRate * dt);
     this.forward.applyQuaternion(this.tmpQ);
-    const k = 1 - Math.exp(-GROUND.airUprightRate * dt);
-    this.tmpQ.setFromUnitVectors(this.up, WORLD_UP);
+
+    if (--this.predictionCountdown <= 0) {
+      this.updatePrediction();
+      this.predictionCountdown = POP.predictionInterval;
+    }
+    const p = this.prediction;
+    const alignTo = p.valid && p.normal.dot(WORLD_UP) >= MAX_LANDING_COS_UP ? p.normal : WORLD_UP;
+    const k = 1 - Math.exp(-POP.airAlignRate * dt);
+    this.tmpQ.setFromUnitVectors(this.up, alignTo);
     this.tmpQ.slerpQuaternions(IDENTITY_Q, this.tmpQ, k);
     this.up.applyQuaternion(this.tmpQ).normalize();
     this.forward.applyQuaternion(this.tmpQ);
     orthonormalize(this.forward, this.up);
+    this.peakY = Math.max(this.peakY, this.position.y);
 
     this.resolveBoardObstacles(dt);
     this.moveBody(dt);
@@ -358,19 +557,105 @@ export class Skater implements PoseSource {
     this.applyContact(contact);
   }
 
+  /**
+   * Réception : l'impact supprime la composante normale de la vitesse, puis la réception est évaluée.
+   * - tilt : angle entre l'axe vertical de la planche et la normale de la surface ;
+   * - yawError : écart entre l'axe de la planche et la vitesse tangentielle (fakie accepté) ;
+   * - impactSpeed : vitesse le long de la normale.
+   */
   private tryLand(dt: number): void {
     const approach = Math.max(0, -this.velocity.dot(this.up)) * dt;
     const contact = this.probeGround(GROUND.probeHeight + GROUND.snapDistance + approach, COS_LANDING);
     if (!contact || this.velocity.dot(contact.normal) > 0) return;
-    // L'impact supprime la composante normale ; la vitesse tangentielle est conservée.
-    this.velocity.addScaledVector(contact.normal, -this.velocity.dot(contact.normal));
+    if (contact.normal.dot(WORLD_UP) < COS_LANDING_SURFACE) return;
+
+    const n = contact.normal;
+    const v = this.velocity;
+    const impact = Math.max(0, -v.dot(n));
+    const tilt = Math.acos(THREE.MathUtils.clamp(this.up.dot(n), -1, 1));
+    v.addScaledVector(n, -v.dot(n));
+    const tangentSpeed = v.length();
+    const fT = this.tmpA.copy(this.forward).addScaledVector(n, -this.forward.dot(n));
+    let yawError = 0;
+    if (tangentSpeed > LANDING.yawCheckMinSpeed && fT.lengthSq() > 1e-8) {
+      fT.normalize();
+      yawError = Math.acos(THREE.MathUtils.clamp(Math.abs(fT.dot(v)) / tangentSpeed, 0, 1));
+    }
+
+    // Une simple descente d'arête sans impact notable n'est pas une réception à évaluer.
+    const significant = this.popped || impact >= LANDING.minImpactForRecovery;
+    let quality: LandingQuality = 'clean';
+    if (significant) {
+      if (tilt > BAIL.maxLandingTilt || yawError > BAIL.maxLandingYawError || impact > BAIL.maxImpactSpeed) quality = 'bail';
+      else if (tilt > LANDING.cleanMaxTilt || yawError > LANDING.cleanMaxYawError) quality = 'sloppy';
+    }
+    const retention =
+      quality === 'clean' ? LANDING.cleanSpeedRetention : quality === 'sloppy' ? LANDING.sloppySpeedRetention : LANDING.bailSpeedRetention;
+    if (significant) v.multiplyScalar(retention);
+
+    // Les roues remettent la planche dans l'axe de la vitesse, dans le sens le plus proche.
+    if (tangentSpeed > LANDING.yawCheckMinSpeed && fT.lengthSq() > 1e-8) {
+      const sign = fT.dot(v) >= 0 ? 1 : -1;
+      this.forward.copy(v).normalize().multiplyScalar(sign);
+    }
     this.applyContact(contact);
     this.grounded = true;
+
+    if (!significant) return;
+    const info = this.lastLanding;
+    info.quality = quality;
+    info.impactSpeed = impact;
+    info.tilt = tilt;
+    info.yawError = yawError;
+    info.airTime = this.airTime;
+    info.peakHeight = Math.max(0, this.peakY - this.takeoffY);
+    info.popped = this.popped;
+    info.position.copy(this.position);
+    info.normal.copy(this.up);
+    this.landTime = 0;
+    this.recovery = quality === 'clean' ? LANDING.cleanRecovery : quality === 'sloppy' ? LANDING.sloppyRecovery : LANDING.bailRecovery;
+    this.popped = false;
+    this.events.land?.(info);
+  }
+
+  /**
+   * Trajectoire balistique depuis l'état courant, découpée en segments testés par rayons.
+   * Donne le point, la normale et le délai de réception (caméra, alignement de la planche).
+   */
+  private updatePrediction(): void {
+    const p = this.predPos.copy(this.position);
+    const v = this.predVel.copy(this.velocity);
+    const h = POP.predictionStep;
+    const pred = this.prediction;
+    for (let t = 0; t < POP.predictionHorizon; t += h) {
+      const next = this.predNext.copy(p).addScaledVector(v, h).addScaledVector(GRAVITY, 0.5 * h * h);
+      const dir = this.tmpB.subVectors(next, p);
+      const len = dir.length();
+      if (len > 1e-6) {
+        dir.divideScalar(len);
+        setVec(this.rayOrigin, p.x, p.y, p.z);
+        setVec(this.rayDir, dir.x, dir.y, dir.z);
+        const hit = this.physics.castRay(this.rayOrigin, this.rayDir, len, this.collider);
+        if (hit) {
+          pred.valid = true;
+          pred.point.set(hit.point.x, hit.point.y, hit.point.z);
+          pred.normal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+          pred.time = t + (hit.toi / len) * h;
+          return;
+        }
+      }
+      p.copy(next);
+      v.addScaledVector(GRAVITY, h);
+    }
+    pred.valid = false;
   }
 
   private leaveGround(): void {
     this.grounded = false;
     this.airTime = 0;
+    this.takeoffY = this.peakY = this.position.y;
+    this.airYawRate = 0;
+    this.predictionCountdown = 0;
   }
 
   private applyContact(c: GroundContact): void {
@@ -464,9 +749,15 @@ export class Skater implements PoseSource {
     out.lean = this.lean;
     out.pushPhase = this.pushPhase;
     out.brake = this.brake;
-    out.crouch = this.grounded ? (this.tuck ? 1 : 0) : 0.6;
+    out.crouch = this.grounded && this.tuck ? 1 : 0;
     out.speed = this.forwardSpeed;
     out.airborne = !this.grounded;
+    out.charge = this.chargeSource ? this.charge : 0;
+    out.popTime = this.popTime;
+    out.airTime = this.grounded ? 0 : this.airTime;
+    out.landTime = this.landTime;
+    out.landImpact = this.landTime >= 0 ? clamp01(this.lastLanding.impactSpeed / BAIL.maxImpactSpeed) : 0;
+    out.landQuality = this.landTime >= 0 ? (this.lastLanding.quality === 'clean' ? 0 : this.lastLanding.quality === 'sloppy' ? 1 : 2) : 0;
   }
 
   dispose(): void {

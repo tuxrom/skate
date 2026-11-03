@@ -109,10 +109,13 @@ export const GROUND = {
   wallDeflectAngle: 0.6,
   /** Lissage de l'orientation visuelle vers la normale du sol (1/s). */
   upSmoothing: 22,
-  /** Retour de la planche vers la verticale en l'air (1/s). */
-  airUprightRate: 1.5,
   /** Angle max entre la planche et la surface pour se réceptionner (rad). */
   maxLandingAngle: 1.0,
+  /**
+   * Angle max entre une surface de réception et la verticale du monde (rad).
+   * Assez pour revenir dans une transition de quarter pipe, jamais sur un mur.
+   */
+  maxLandingSurfaceAngle: 1.3,
 } as const;
 
 /** Poussée, vitesse, virage et freinage. */
@@ -125,11 +128,11 @@ export const SKATING = {
   pushRecovery: 0.28,
   /** Vitesse au-delà de laquelle une poussée n'apporte plus rien (m/s). Son efficacité décroît linéairement jusque-là. */
   pushSpeedCap: 7.5,
-  /** Multiplicateur d'impulsion avec Shift (accélérer). */
+  /** Multiplicateur d'impulsion des poussées enchaînées en maintenant la touche (accélérer). */
   boostImpulseMultiplier: 1.35,
-  /** Multiplicateur de cadence avec Shift (durées divisées par ce facteur). */
+  /** Multiplicateur de cadence des poussées enchaînées (durées divisées par ce facteur). */
   boostCadenceMultiplier: 1.3,
-  /** Plafond de poussée avec Shift (m/s). */
+  /** Plafond des poussées enchaînées (m/s). */
   boostSpeedCap: 9.5,
   /** Vitesse maximale au sol (m/s), atteignable en descente. */
   maxSpeed: 15,
@@ -159,28 +162,63 @@ export const SKATING = {
   stationaryTurnBlendSpeed: 1.2,
   /** Accélération latérale max avant dérapage (m/s²). */
   maxLateralGrip: 14,
-  /** Rotation de cap en l'air à pleine inclinaison (rad/s). */
-  airTurnRate: 1.2,
 } as const;
 
-/** Ollie, nollie et contrôle aérien. */
+/** Ollie et contrôle aérien. */
 export const POP = {
-  /** Vitesse verticale donnée par un ollie à charge complète (m/s). */
-  ollieVelocity: 5.2,
-  /** Fraction de ollieVelocity obtenue avec une charge minimale. */
-  minChargeRatio: 0.55,
-  /** Durée de charge pour atteindre la puissance maximale (s). */
-  chargeTime: 0.35,
-  /** Facteur appliqué au pop pour un nollie. */
+  /** Hauteur de vol du contact au-dessus du point de pop, charge minimale (m). */
+  minHeight: 0.22,
+  /** Hauteur de vol à pleine charge (m). La vitesse de pop vaut √(2·g·h). */
+  maxHeight: 0.85,
+  /** Durée de charge pour atteindre la pleine hauteur (s). La hauteur est linéaire en charge. */
+  chargeTime: 0.4,
+  /** Délai entre le relâchement et le décollage, le temps du claquement du tail (s). */
+  popDelay: 0.07,
+  /** Facteur appliqué au pop pour un nollie (étape 3). */
   nollieMultiplier: 0.92,
-  /** Part de la vitesse horizontale conservée au décollage. */
-  takeoffSpeedRetention: 0.98,
-  /** Vitesse angulaire de rotation en l'air, axe vertical (rad/s). */
-  airSpinRate: 6.5,
-  /** Contrôle de direction en l'air (m/s² latéraux). */
-  airSteer: 1.5,
+  /** Part de la vitesse tangentielle conservée au décollage. */
+  takeoffSpeedRetention: 1.0,
+  /** Vitesse de rotation max du corps en l'air, axe vertical (rad/s). Contrôle volontairement léger. */
+  airSpinRate: 3.2,
+  /** Réponse de la rotation aérienne à l'input (1/s). Plus bas = plus d'inertie. */
+  airSpinResponse: 6,
+  /** Alignement automatique de la planche sur la surface de réception prévue (1/s). */
+  airAlignRate: 3,
   /** Durée minimale de vol pour qu'un trick soit validé (s). */
   minAirTime: 0.18,
+  /** Horizon de prédiction de la trajectoire (s). */
+  predictionHorizon: 2.5,
+  /** Pas de la prédiction de trajectoire (s). */
+  predictionStep: 0.04,
+  /** La prédiction est recalculée tous les N pas fixes. */
+  predictionInterval: 3,
+} as const;
+
+/** Évaluation de la réception. Au-delà des seuils BAIL, la réception est une chute (étape 6). */
+export const LANDING = {
+  /** Angle planche / surface max pour une réception propre (rad). */
+  cleanMaxTilt: 0.2,
+  /** Écart max entre l'axe de la planche et la vitesse pour une réception propre (rad). */
+  cleanMaxYawError: 0.22,
+  /**
+   * Vitesse d'impact minimale pour évaluer une réception sans pop (m/s).
+   * En dessous (petite arête, joint), on reste en roue libre sans effet ni récupération.
+   */
+  minImpactForRecovery: 0.9,
+  /** Vitesse sous laquelle l'écart de cap n'est pas évalué (m/s). */
+  yawCheckMinSpeed: 1.0,
+  /** Part de la vitesse tangentielle conservée, réception propre. */
+  cleanSpeedRetention: 0.98,
+  /** Part de la vitesse tangentielle conservée, réception sale. */
+  sloppySpeedRetention: 0.78,
+  /** Part de la vitesse conservée sur une réception hors limites, en attendant les bails. */
+  bailSpeedRetention: 0.5,
+  /** Temps de récupération après une réception propre, sans pop ni poussée (s). */
+  cleanRecovery: 0.08,
+  /** Temps de récupération après une réception sale (s). */
+  sloppyRecovery: 0.35,
+  /** Temps de récupération après une réception hors limites (s). */
+  bailRecovery: 0.7,
 } as const;
 
 /** Flips et grabs. */
@@ -233,11 +271,15 @@ export const BAIL = {
 
 /** Fenêtres et délais d'input. */
 export const INPUT = {
-  /** Mémorisation d'un pop pressé juste avant de toucher le sol (ms). */
+  /** Un tap d'ollie fait juste avant la réception déclenche un pop à la réception (ms). */
   popBufferMs: 120,
-  /** Pop toléré juste après avoir quitté une arête (coyote time, ms). */
+  /** Relâcher la charge juste après avoir quitté une arête déclenche encore le pop (coyote time, ms). */
   coyoteMs: 90,
-  /** Fenêtre pour enchaîner un flick après le pop (ms). */
+  /** Stick droit vers le bas au-delà de ce seuil : début de charge d'ollie (0 à 1). */
+  ollieStickDown: 0.6,
+  /** Stick droit vers le haut au-delà de ce seuil, après la charge : pop (0 à 1). */
+  ollieStickUp: 0.6,
+  /** Fenêtre pour donner le flick vers le haut une fois le stick sorti du bas, sinon la charge est annulée (ms). */
   flickWindowMs: 180,
   /** Amplitude minimale du stick pour qu'un flick soit reconnu (0 à 1). */
   flickThreshold: 0.6,

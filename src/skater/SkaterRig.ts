@@ -13,10 +13,50 @@ export interface SkaterPose {
   /** Vitesse signée le long du cap (m/s), pour la rotation des roues. */
   speed: number;
   airborne: boolean;
+  /** Charge d'ollie en cours (0 à 1), 0 hors charge. */
+  charge: number;
+  /** Temps depuis le début du pop (s), -1 sinon. Le décollage a lieu à POP.popDelay. */
+  popTime: number;
+  /** Temps passé en l'air (s), 0 au sol. */
+  airTime: number;
+  /** Temps depuis la dernière réception évaluée (s), -1 sinon. */
+  landTime: number;
+  /** Violence de cette réception (0 à 1). */
+  landImpact: number;
+  /** Qualité de cette réception : 0 propre, 1 sale, 2 hors limites. */
+  landQuality: number;
 }
 
 export function createPose(): SkaterPose {
-  return { lean: 0, pushPhase: -1, brake: 0, crouch: 0, speed: 0, airborne: false };
+  return {
+    lean: 0,
+    pushPhase: -1,
+    brake: 0,
+    crouch: 0,
+    speed: 0,
+    airborne: false,
+    charge: 0,
+    popTime: -1,
+    airTime: 0,
+    landTime: -1,
+    landImpact: 0,
+    landQuality: 0,
+  };
+}
+
+export function copyPose(out: SkaterPose, src: SkaterPose): void {
+  out.lean = src.lean;
+  out.pushPhase = src.pushPhase;
+  out.brake = src.brake;
+  out.crouch = src.crouch;
+  out.speed = src.speed;
+  out.airborne = src.airborne;
+  out.charge = src.charge;
+  out.popTime = src.popTime;
+  out.airTime = src.airTime;
+  out.landTime = src.landTime;
+  out.landImpact = src.landImpact;
+  out.landQuality = src.landQuality;
 }
 
 /**

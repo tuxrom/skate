@@ -1,11 +1,28 @@
-import { INPUT, SKATING } from '@/config/physics';
+import { INPUT, POP, SKATING } from '@/config/physics';
 import type { State, StateMachine } from './StateMachine';
 import type { SkaterStateId } from './states';
 import type { Skater } from './Skater';
 
 type SkaterState = State<SkaterStateId, Skater>;
 
-/** Arrêté sur la planche. On peut pivoter sur place et lancer une poussée. */
+/** Sortie commune des états au sol vers l'ollie : charge, ou pop immédiat pour un tap mémorisé. */
+function ollieStart(sk: Skater): SkaterStateId | null {
+  if (sk.recovery > 0) return null;
+  const source = sk.ollieStartRequested();
+  if (!source) return null;
+  if (source === 'buffered') {
+    sk.startCharge('button');
+    return 'pop';
+  }
+  sk.startCharge(source);
+  return 'popCharge';
+}
+
+function rollingState(sk: Skater): SkaterStateId {
+  return sk.speed < SKATING.stopSpeed ? 'idle' : 'riding';
+}
+
+/** Arrêté sur la planche. On peut pivoter sur place, pousser, ou faire un ollie sur place. */
 const idle: SkaterState = {
   id: 'idle',
   enter(sk) {
@@ -16,6 +33,8 @@ const idle: SkaterState = {
   update(sk, dt) {
     sk.updateLean(dt);
     if (!sk.grounded) return 'air';
+    const ollie = ollieStart(sk);
+    if (ollie) return ollie;
     if (sk.pushRequested()) return 'pushing';
     if (sk.speed > SKATING.stopSpeed * 2) return 'riding';
     return null;
@@ -33,6 +52,8 @@ const riding: SkaterState = {
   update(sk, dt) {
     sk.updateLean(dt);
     if (!sk.grounded) return 'air';
+    const ollie = ollieStart(sk);
+    if (ollie) return ollie;
     if (sk.brakeRequested() && sk.speed > SKATING.stopSpeed) return 'braking';
     if (sk.pushRequested()) return 'pushing';
     if (sk.speed < SKATING.stopSpeed) return 'idle';
@@ -44,11 +65,13 @@ const riding: SkaterState = {
  * Poussée : un temps de contact où l'accélération suit une cloche 2·sin²(πx)
  * (intégrale 1, donc l'impulsion totale vaut pushImpulse), puis le retour du pied.
  * L'efficacité baisse avec la vitesse jusqu'au plafond de poussée.
+ * Maintenir la touche enchaîne des poussées plus fortes et plus rapides.
  */
 const pushing: SkaterState = {
   id: 'pushing',
   enter(sk) {
     sk.pushTimer = 0;
+    sk.pushChain = 0;
     sk.brake = 0;
     sk.pushQueuedUntil = -1;
   },
@@ -59,6 +82,8 @@ const pushing: SkaterState = {
   update(sk, dt) {
     sk.updateLean(dt);
     if (!sk.grounded) return 'air';
+    const ollie = ollieStart(sk);
+    if (ollie) return ollie;
     if (sk.brakeRequested()) return 'braking';
 
     const boost = sk.boostHeld();
@@ -83,11 +108,12 @@ const pushing: SkaterState = {
 
     if (sk.pushTimer >= contact + recovery) {
       if (sk.pushRequested()) {
+        if (sk.input.held.has('push')) sk.pushChain++;
         sk.pushTimer = 0;
         sk.pushQueuedUntil = -1;
         return null;
       }
-      return sk.speed < SKATING.stopSpeed ? 'idle' : 'riding';
+      return rollingState(sk);
     }
     return null;
   },
@@ -105,6 +131,8 @@ const braking: SkaterState = {
   update(sk, dt) {
     sk.updateLean(dt);
     if (!sk.grounded) return 'air';
+    const ollie = ollieStart(sk);
+    if (ollie) return ollie;
     if (sk.speed < SKATING.stopSpeed) return 'idle';
     if (!sk.brakeRequested()) return 'riding';
     sk.brake = Math.min(1, sk.brake + dt / SKATING.brakeRampTime);
@@ -112,7 +140,53 @@ const braking: SkaterState = {
   },
 };
 
-/** En l'air. La réception est détectée par la simulation, qui repasse grounded à vrai. */
+/**
+ * Charge de l'ollie : le skateur s'accroupit, la hauteur future croît avec la durée.
+ * Quitter le sol pendant la charge garde la charge quelques millisecondes (coyote time).
+ */
+const popCharge: SkaterState = {
+  id: 'popCharge',
+  enter(sk) {
+    sk.pushAccel = 0;
+    sk.pushPhase = -1;
+    sk.brake = 0;
+  },
+  update(sk, dt) {
+    sk.updateLean(dt);
+    sk.updateCharge(dt);
+    if (!sk.grounded) {
+      sk.coyoteCharge = sk.charge;
+      return 'air';
+    }
+    const release = sk.ollieReleaseRequested(dt);
+    if (release === 'pop') return 'pop';
+    if (release === 'cancel') {
+      sk.cancelCharge();
+      return rollingState(sk);
+    }
+    return null;
+  },
+};
+
+/** Claquement du tail : court délai avant le décollage, qui donne du poids au saut. */
+const pop: SkaterState = {
+  id: 'pop',
+  enter(sk) {
+    sk.popTimer = 0;
+    sk.popTime = 0;
+  },
+  update(sk, dt) {
+    sk.updateLean(dt);
+    sk.popTimer += dt;
+    if (sk.popTimer >= POP.popDelay || !sk.grounded) {
+      sk.performPop(sk.charge);
+      return 'air';
+    }
+    return null;
+  },
+};
+
+/** En l'air. La réception est détectée et évaluée par la simulation. */
 const air: SkaterState = {
   id: 'air',
   enter(sk) {
@@ -122,11 +196,23 @@ const air: SkaterState = {
   },
   update(sk, dt) {
     sk.updateLean(dt);
-    if (sk.grounded) return sk.speed < SKATING.stopSpeed ? 'idle' : 'riding';
+    if (sk.tryCoyotePop()) return null;
+    if (sk.grounded) return sk.recovery > 0 ? 'landing' : rollingState(sk);
+    return null;
+  },
+};
+
+/** Récupération après une réception : ni pop ni poussée tant qu'elle dure. */
+const landing: SkaterState = {
+  id: 'landing',
+  update(sk, dt) {
+    sk.updateLean(dt);
+    if (!sk.grounded) return 'air';
+    if (sk.recovery <= 0) return rollingState(sk);
     return null;
   },
 };
 
 export function registerSkaterStates(fsm: StateMachine<SkaterStateId, Skater>): void {
-  fsm.add(idle).add(riding).add(pushing).add(braking).add(air);
+  fsm.add(idle).add(riding).add(pushing).add(braking).add(popCharge).add(pop).add(air).add(landing);
 }

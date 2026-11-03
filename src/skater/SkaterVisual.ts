@@ -1,7 +1,7 @@
 import type * as THREE from 'three';
 import { InterpolatedBody } from '@/physics/InterpolatedBody';
 import type { Skater } from './Skater';
-import { createPose, type SkaterPose, type SkaterRig } from './SkaterRig';
+import { copyPose, createPose, type SkaterRig } from './SkaterRig';
 
 /** Relie la simulation du skateur à son rig : transform et pose d'animation interpolés. */
 export class SkaterVisual {
@@ -46,17 +46,19 @@ export class SkaterVisual {
     o.crouch = a.crouch + (b.crouch - a.crouch) * alpha;
     o.speed = a.speed + (b.speed - a.speed) * alpha;
     // La phase de poussée boucle : pas d'interpolation à travers un redémarrage.
-    o.pushPhase = a.pushPhase >= 0 && b.pushPhase >= a.pushPhase ? a.pushPhase + (b.pushPhase - a.pushPhase) * alpha : b.pushPhase;
+    o.pushPhase = lerpTimer(a.pushPhase, b.pushPhase, alpha);
     o.airborne = b.airborne;
+    o.charge = b.charge > 0 ? a.charge + (b.charge - a.charge) * alpha : 0;
+    o.popTime = lerpTimer(a.popTime, b.popTime, alpha);
+    o.airTime = lerpTimer(a.airTime, b.airTime, alpha);
+    o.landTime = lerpTimer(a.landTime, b.landTime, alpha);
+    o.landImpact = b.landImpact;
+    o.landQuality = b.landQuality;
     this.rig.update(o, dt);
   }
 }
 
-function copyPose(out: SkaterPose, src: SkaterPose): void {
-  out.lean = src.lean;
-  out.pushPhase = src.pushPhase;
-  out.brake = src.brake;
-  out.crouch = src.crouch;
-  out.speed = src.speed;
-  out.airborne = src.airborne;
+/** Interpole un temps qui croît pendant le segment ; un redémarrage ou un -1 prend la valeur courante. */
+function lerpTimer(a: number, b: number, alpha: number): number {
+  return a >= 0 && b >= a ? a + (b - a) * alpha : b;
 }

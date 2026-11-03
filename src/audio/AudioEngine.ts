@@ -1,3 +1,5 @@
+import { playLand, playPop } from './sfx';
+
 /**
  * Moteur audio Web Audio. Tous les sons sont synthétisés ; une future
  * implémentation pourra charger des samples derrière la même interface.
@@ -31,6 +33,16 @@ export class AudioEngine {
   setMuted(muted: boolean): void {
     this.muted = muted;
     if (this.master) this.master.gain.value = muted ? 0 : this.volume;
+  }
+
+  /** Claquement du tail au pop. */
+  pop(strength: number): void {
+    if (this.ctx && this.master && !this.muted) playPop(this.ctx, this.master, strength);
+  }
+
+  /** Réception de la planche. */
+  land(strength: number, sloppy: boolean): void {
+    if (this.ctx && this.master && !this.muted) playLand(this.ctx, this.master, strength, sloppy);
   }
 
   /** Bip court de test (debug). */

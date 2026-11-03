@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BODY } from '@/config/physics';
+import { BODY, POP } from '@/config/physics';
 import type { SkaterPose, SkaterRig } from './SkaterRig';
 
 // Gabarit visuel (m). Les dimensions qui comptent pour la physique viennent de BODY.
@@ -28,6 +28,23 @@ const PUSH_END_Z = 0.5;
 const PUSH_LIFT = 0.14;
 const BRAKE_FOOT = new THREE.Vector3(0.1, ANKLE_HEIGHT - DECK_TOP + 0.005, 0.48);
 
+// Ollie (animation seule ; les durées de gameplay viennent de POP).
+/** Pivot du tangage : contact des roues arrière. */
+const PIVOT_Z = BODY.wheelbase / 2;
+/** Tangage max du board au claquement du tail (rad). */
+const POP_PITCH = 0.5;
+/** Durée du nivelage par le pied avant après le décollage (s). */
+const LEVEL_TIME = 0.2;
+/** Position du pied arrière sur le tail pendant la charge. */
+const TAIL_FOOT_Z = 0.31;
+/** Pied avant reculé derrière les vis pendant la charge, puis glissé vers le nose. */
+const FRONT_CHARGE_Z = -0.08;
+const FRONT_SLIDE_Z = -0.29;
+const HIP_HEIGHT_EXTEND = 0.9;
+const CHARGE_CROUCH = 0.95;
+const AIR_TUCK = 0.6;
+const AIR_RELAX = 0.35;
+
 const UP = new THREE.Vector3(0, 1, 0);
 const KNEE_HINT = new THREE.Vector3(1, 0, 0);
 
@@ -53,6 +70,10 @@ class Limb {
 /** Skateur en primitives : planche (deck, kicks, trucks, 4 roues) et rider animé par IK. */
 export class ProceduralSkaterRig implements SkaterRig {
   readonly root = new THREE.Group();
+  /** Roulis (inclinaison), porte le board et le rider. */
+  private readonly roll = new THREE.Group();
+  /** Tangage du board seul, autour des roues arrière. */
+  private readonly pitchPivot = new THREE.Group();
   private readonly board = new THREE.Group();
   private readonly rider = new THREE.Group();
   private readonly torso = new THREE.Group();
@@ -77,6 +98,7 @@ export class ProceduralSkaterRig implements SkaterRig {
   private readonly shoulder = new THREE.Vector3();
   private readonly elbow = new THREE.Vector3();
   private readonly hand = new THREE.Vector3();
+  private readonly frontFoot = new THREE.Vector3();
 
   constructor() {
     this.root.name = 'skater';
@@ -92,9 +114,13 @@ export class ProceduralSkaterRig implements SkaterRig {
       cap: this.track(new THREE.MeshStandardMaterial({ color: 0x2c6e91, roughness: 0.8 })),
     };
 
-    this.root.add(this.board);
+    this.root.add(this.roll);
+    this.roll.add(this.pitchPivot);
+    this.pitchPivot.position.z = PIVOT_Z;
+    this.pitchPivot.add(this.board);
+    this.board.position.z = -PIVOT_Z;
     this.buildBoard(m);
-    this.board.add(this.rider);
+    this.roll.add(this.rider);
     this.rider.position.y = DECK_TOP;
 
     const limbGeo = this.track(new THREE.CylinderGeometry(0.065, 0.055, 1, 10));
@@ -163,24 +189,30 @@ export class ProceduralSkaterRig implements SkaterRig {
     if (!pose.airborne) this.wheelAngle -= (pose.speed / WHEEL_RADIUS) * dt;
     for (const w of this.wheels) w.rotation.x = this.wheelAngle;
 
-    // La planche s'incline dans le virage, le rider suit avec elle.
-    this.board.rotation.z = -pose.lean;
+    const ollie = this.ollieCurves(pose);
+    const landing = this.landingCurves(pose);
+
+    // Roulis : inclinaison, plus le déséquilibre d'une réception sale. Tangage : ollie.
+    this.roll.rotation.z = -(pose.lean + landing.wobble);
+    this.pitchPivot.rotation.x = ollie.pitch;
 
     const pushing = pose.pushPhase >= 0;
     const contact = pushing && pose.pushPhase < 1;
     const pushWeight = pushing ? (contact ? 1 : 1 - smooth(pose.pushPhase - 1)) : 0;
-    const crouch = Math.max(pose.crouch, pushWeight * 0.45, pose.brake * 0.35);
+    const crouch = Math.max(pose.crouch, pushWeight * 0.45, pose.brake * 0.35, ollie.crouch, landing.crouch);
 
-    // Bassin : se baisse et se décale sur le pied avant pendant la poussée.
-    this.hip.set(-0.03 + pushWeight * 0.04, lerp(HIP_HEIGHT_STAND, HIP_HEIGHT_CROUCH, crouch), -0.01 - pushWeight * 0.1);
+    // Bassin : se baisse et se décale sur le pied avant pendant la poussée, se tend au pop.
+    const hipHeight = lerp(lerp(HIP_HEIGHT_STAND, HIP_HEIGHT_CROUCH, crouch), HIP_HEIGHT_EXTEND, ollie.extend);
+    this.hip.set(-0.03 + pushWeight * 0.04, hipHeight, -0.01 - pushWeight * 0.1 + ollie.hipShift);
     this.torso.position.copy(this.hip);
-    this.torso.rotation.set(0, 0, -(pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15));
+    this.torso.rotation.set(0, 0, -(pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15 + landing.wobble * 0.8));
 
-    // Pied avant : toujours sur la planche.
-    this.solveLeg(FRONT_FOOT, -1, this.frontThigh, this.frontShin, this.frontKnee, this.frontShoe);
+    // Pied avant : sur le deck, il recule pendant la charge puis glisse vers le nose pour niveler.
+    this.deckPoint(this.frontFoot, FRONT_FOOT.x, FRONT_FOOT.y, ollie.frontZ, ollie.pitch);
+    this.solveLeg(this.frontFoot, -1, this.frontThigh, this.frontShin, this.frontKnee, this.frontShoe);
 
-    // Pied arrière : sur la planche, au sol pour pousser, ou en frein.
-    this.foot.copy(BACK_FOOT);
+    // Pied arrière : sur le tail pendant l'ollie, au sol pour pousser, ou en frein.
+    this.deckPoint(this.foot, BACK_FOOT.x, BACK_FOOT.y, ollie.backZ, ollie.pitch);
     if (pushing) {
       const groundY = ANKLE_HEIGHT - DECK_TOP;
       if (contact) {
@@ -198,15 +230,88 @@ export class ProceduralSkaterRig implements SkaterRig {
     }
     this.solveLeg(this.foot, 1, this.backThigh, this.backShin, this.backKnee, this.backShoe);
 
-    // Bras : écartés pour l'équilibre, plus en l'air et en virage serré.
-    const balance = Math.min(1, Math.abs(pose.lean) * 2 + (pose.airborne ? 0.6 : 0) + pushWeight * 0.3);
+    // Bras : écartés pour l'équilibre, plus en l'air, en virage serré et après une réception sale.
+    const balance = Math.min(1, Math.abs(pose.lean) * 2 + (pose.airborne ? 0.6 : 0) + pushWeight * 0.3 + ollie.extend * 0.5 + landing.flail);
     for (const arm of this.arms) {
+      const flail = landing.flail * Math.sin(pose.landTime * 18 + arm.side) * 0.15;
       this.shoulder.set(0, 0.5, arm.side * 0.2);
-      this.elbow.set(0.04, 0.26 + balance * 0.08, arm.side * (0.27 + balance * 0.12));
-      this.hand.set(0.1 - pose.lean * 0.15, 0.06 + balance * 0.18, arm.side * (0.3 + balance * 0.25));
+      this.elbow.set(0.04, 0.26 + balance * 0.08 + flail, arm.side * (0.27 + balance * 0.12));
+      this.hand.set(0.1 - pose.lean * 0.15, 0.06 + balance * 0.18 - flail, arm.side * (0.3 + balance * 0.25));
       arm.upper.set(this.shoulder, this.elbow);
       arm.lower.set(this.elbow, this.hand);
     }
+  }
+
+  /**
+   * Courbes de l'ollie : charge accroupie avec le pied arrière sur le tail, claquement qui lève le nose
+   * et tend les jambes, puis nivelage par glissement du pied avant et genoux rentrés.
+   */
+  private readonly ollieOut = { pitch: 0, crouch: 0, extend: 0, frontZ: FRONT_FOOT.z, backZ: BACK_FOOT.z, hipShift: 0 };
+  private ollieCurves(pose: SkaterPose): typeof this.ollieOut {
+    const o = this.ollieOut;
+    o.pitch = 0;
+    o.extend = 0;
+    o.hipShift = 0;
+    o.crouch = pose.airborne ? AIR_RELAX : 0;
+    const c = smooth(pose.charge * 1.6);
+    o.frontZ = lerp(FRONT_FOOT.z, FRONT_CHARGE_Z, c);
+    o.backZ = lerp(BACK_FOOT.z, TAIL_FOOT_Z, c);
+    o.crouch = Math.max(o.crouch, pose.charge * CHARGE_CROUCH);
+    o.hipShift = c * 0.05;
+
+    const t = pose.popTime;
+    if (t < 0) return o;
+    if (t < POP.popDelay) {
+      // Claquement : le tail frappe, le nose monte, les jambes se détendent.
+      const u = smooth(t / POP.popDelay);
+      o.pitch = POP_PITCH * u;
+      o.extend = u;
+      o.crouch = lerp(o.crouch, 0, u);
+      o.frontZ = FRONT_CHARGE_Z;
+      o.backZ = TAIL_FOOT_Z;
+      return o;
+    }
+    // Après le décollage : nivelage, genoux rentrés, puis retour à une position détendue.
+    const tau = t - POP.popDelay;
+    const level = smooth(tau / LEVEL_TIME);
+    o.pitch = POP_PITCH * (1 - level);
+    o.extend = 1 - smooth(tau / 0.08);
+    const tuckIn = smooth(tau / 0.12);
+    const relax = smooth((tau - 0.25) / 0.3);
+    o.crouch = pose.airborne ? lerp(AIR_TUCK * tuckIn, AIR_RELAX, relax) : o.crouch;
+    const slide = smooth(tau / 0.12);
+    const back = smooth((tau - 0.2) / 0.2);
+    o.frontZ = lerp(lerp(FRONT_CHARGE_Z, FRONT_SLIDE_Z, slide), FRONT_FOOT.z, back);
+    o.backZ = lerp(TAIL_FOOT_Z, BACK_FOOT.z, back);
+    return o;
+  }
+
+  /** Courbes de réception : compression proportionnelle à l'impact, déséquilibre si la réception est sale. */
+  private readonly landingOut = { crouch: 0, wobble: 0, flail: 0 };
+  private landingCurves(pose: SkaterPose): typeof this.landingOut {
+    const o = this.landingOut;
+    o.crouch = 0;
+    o.wobble = 0;
+    o.flail = 0;
+    const l = pose.landTime;
+    if (l < 0) return o;
+    const envelope = l < 0.05 ? l / 0.05 : Math.exp(-(l - 0.05) * 7);
+    o.crouch = envelope * (0.3 + 0.7 * pose.landImpact);
+    if (pose.landQuality > 0) {
+      const amount = pose.landQuality === 1 ? 0.12 : 0.25;
+      o.wobble = Math.sin(l * 22) * amount * Math.exp(-l * 4);
+      o.flail = Math.exp(-l * 3) * (pose.landQuality === 1 ? 0.6 : 1);
+    }
+    return o;
+  }
+
+  /** Point du deck (repère du rider) après tangage du board autour du pivot arrière. */
+  private deckPoint(out: THREE.Vector3, x: number, yAboveDeck: number, z: number, pitch: number): THREE.Vector3 {
+    const y = DECK_TOP + yAboveDeck;
+    const dz = z - PIVOT_Z;
+    const c = Math.cos(pitch);
+    const sn = Math.sin(pitch);
+    return out.set(x, y * c - dz * sn - DECK_TOP, y * sn + dz * c + PIVOT_Z);
   }
 
   /** IK à deux segments, genou plié vers l'avant du rider (+X). */

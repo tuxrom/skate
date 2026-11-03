@@ -10,10 +10,10 @@ import { ProceduralSkaterRig } from '@/skater/ProceduralSkaterRig';
  * Pour passer aux modèles : écrire une GltfAssets qui implémente AssetProvider
  * (GLTFLoader + preload()), puis la passer à Game à la place de ProceduralAssets.
  */
-export type AssetId = 'ground' | 'box' | 'prism';
+export type AssetId = 'ground' | 'box' | 'prism' | 'rail';
 
 /** Aspect de surface d'un élément de décor. */
-export type Finish = 'ground' | 'park' | 'wall';
+export type Finish = 'ground' | 'park' | 'wall' | 'metal';
 
 /** Profil 2D (z, y) d'un module extrudé sur sa largeur (axe X local). */
 export type Profile = ReadonlyArray<readonly [number, number]>;
@@ -25,6 +25,9 @@ export interface AssetParams {
   profile?: Profile;
   /** Largeur d'extrusion du profil (m). */
   width?: number;
+  /** Longueur et rayon d'un tube 'rail', centré, le long de Y (m). */
+  length?: number;
+  radius?: number;
   finish?: Finish;
 }
 
@@ -53,10 +56,12 @@ export class ProceduralAssets implements AssetProvider {
     make('ground', createConcreteTexture({ seed: 7, slab: 128 }), 0.95);
     make('park', createConcreteTexture({ seed: 21, base: '#b3aea5', slab: 512 }), 0.85);
     make('wall', createConcreteTexture({ seed: 4, base: '#5f6b75', slab: 256 }), 0.9);
+    this.materials.set('metal', this.track(new THREE.MeshStandardMaterial({ color: 0xa9b1b8, roughness: 0.35, metalness: 0.85 })));
   }
 
   create(id: AssetId, params: AssetParams = {}): THREE.Object3D {
-    const material = this.materials.get(params.finish ?? (id === 'ground' ? 'ground' : 'park'))!;
+    const fallback: Finish = id === 'ground' ? 'ground' : id === 'rail' ? 'metal' : 'park';
+    const material = this.materials.get(params.finish ?? fallback)!;
     let geometry: THREE.BufferGeometry;
     switch (id) {
       case 'ground': {
@@ -77,6 +82,11 @@ export class ProceduralAssets implements AssetProvider {
       case 'prism':
         geometry = extrudeProfile(params.profile ?? [], params.width ?? 1);
         break;
+      case 'rail': {
+        const r = params.radius ?? 0.025;
+        geometry = new THREE.CylinderGeometry(r, r, params.length ?? 1, 12);
+        break;
+      }
     }
     const mesh = new THREE.Mesh(this.track(geometry), material);
     mesh.receiveShadow = true;

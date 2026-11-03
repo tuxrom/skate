@@ -2,7 +2,20 @@ import * as THREE from 'three';
 import type { PhysicsWorld } from '@/physics/PhysicsWorld';
 import type { AssetProvider } from './assets';
 import { RENDER } from '@/config/render';
-import { addBox, addProfileModule, bank, funbox, hump, kicker, quarterPipe, type BuildContext } from './parkModules';
+import {
+  addBox,
+  addProfileModule,
+  addRail,
+  bank,
+  funbox,
+  hump,
+  kicker,
+  placePoint,
+  quarterPipe,
+  stairSet,
+  type BuildContext,
+  type Placement,
+} from './parkModules';
 
 // Mise en page du skatepark de test (m).
 /** Demi-côté de la zone roulable, intérieur des murs. */
@@ -11,6 +24,24 @@ const WALL_HEIGHT = 1.5;
 const WALL_THICKNESS = 0.6;
 const GROUND_SIZE = 200;
 const GROUND_THICKNESS = 0.5;
+/** Escalier : 5 marches de 17 cm, palier de 3 m, rampe d'accès à 13°. */
+const STAIRS: Placement = { x: 28, z: -2 };
+const STAIRS_WIDTH = 6;
+const STAIRS_HEIGHT = 0.85;
+const STAIRS_STEPS = 5;
+const STAIRS_TREAD = 0.35;
+/** Rampe d'escalier (main courante) : décalage latéral, hauteur au-dessus des nez de marche, rayon. */
+const HANDRAIL_X = 2.6;
+const HANDRAIL_HEIGHT = 0.85;
+const HANDRAIL_RADIUS = 0.025;
+/** Petit gap : deux plateformes de 60 cm séparées de 1,6 m. */
+const GAP_X = -20;
+const GAP_WIDTH = 4;
+const GAP_HEIGHT = 0.6;
+const GAP_RAMP = 2.4;
+const GAP_DECK = 2;
+const GAP_LENGTH = 1.6;
+const GAP_START_Z = 6;
 /** Position du soleil relative au point suivi par l'ombre (m). */
 const SUN_OFFSET = new THREE.Vector3(12, 20, 8);
 
@@ -25,6 +56,7 @@ export const SPAWN = {
  * - Nord : quarter pipe large.
  * - Ouest : bank à 25°.
  * - Centre : funbox, kicker, manual pad, curb bas, bosse douce, ledge.
+ * - Ajouts de l'étape 2 : marche de 20 cm, petit gap, petit quarter pipe, escalier avec rampe.
  */
 export class Level {
   readonly root = new THREE.Group();
@@ -75,8 +107,8 @@ export class Level {
   }
 
   private buildModules(ctx: BuildContext): void {
-    addProfileModule(ctx, quarterPipe(3.2, 2.2, 3, 14), 22, { x: 0, z: -33 });
-    addProfileModule(ctx, bank(3.2, 1.5, 3), 24, { x: -30, z: 0, yaw: Math.PI / 2 });
+    addProfileModule(ctx, quarterPipe(3.2, 2.2, 3.9, 14), 22, { x: 0, z: -33 });
+    addProfileModule(ctx, bank(3.2, 1.5, 6.75), 24, { x: -30, z: 0, yaw: Math.PI / 2 });
     addProfileModule(ctx, funbox(2.6, 0.75, 3), 5, { x: -10, z: -8 });
     addProfileModule(ctx, kicker(1.8, 0.45), 1.6, { x: 9, z: 0 });
     addProfileModule(ctx, hump(12, 0.6), 6, { x: 24, z: 14, yaw: Math.PI / 2 });
@@ -86,6 +118,34 @@ export class Level {
     addBox(ctx, { x: -6, y: 0.06, z: 16 }, { x: 6, y: 0.12, z: 0.3 });
     // Ledge.
     addBox(ctx, { x: 20, y: 0.25, z: -14 }, { x: 0.5, y: 0.5, z: 6 });
+
+    // Marche de 20 cm : à monter en ollie, à descendre en roulant.
+    addBox(ctx, { x: -20, y: 0.1, z: 24 }, { x: 8, y: 0.2, z: 4 });
+
+    // Petit gap : rampe et plateforme d'appel, vide, plateforme et rampe de réception (tournée de 180°).
+    const gapDeckEnd = GAP_START_Z - GAP_RAMP - GAP_DECK;
+    addProfileModule(ctx, bank(GAP_RAMP, GAP_HEIGHT, GAP_DECK), GAP_WIDTH, { x: GAP_X, z: GAP_START_Z });
+    addProfileModule(ctx, bank(GAP_RAMP, GAP_HEIGHT, GAP_DECK), GAP_WIDTH, {
+      x: GAP_X,
+      z: gapDeckEnd - GAP_LENGTH - GAP_RAMP - GAP_DECK,
+      yaw: Math.PI,
+    });
+
+    // Petit quarter pipe à l'est, abordé en roulant vers +X. Les decks vont jusqu'au mur : pas de trou derrière.
+    addProfileModule(ctx, quarterPipe(2, 1.2, 3.6, 10), 8, { x: 34.5, z: 6, yaw: -Math.PI / 2 });
+
+    this.buildStairs(ctx);
+  }
+
+  private buildStairs(ctx: BuildContext): void {
+    const stairs = stairSet(3.6, STAIRS_HEIGHT, 3, STAIRS_STEPS, STAIRS_TREAD);
+    addProfileModule(ctx, stairs, STAIRS_WIDTH, STAIRS);
+    // Main courante sur le côté : suit la ligne des nez de marche, deux montants.
+    const top = placePoint(STAIRS, HANDRAIL_X, STAIRS_HEIGHT + HANDRAIL_HEIGHT, stairs.topZ + 0.25);
+    const bottom = placePoint(STAIRS, HANDRAIL_X, HANDRAIL_HEIGHT, stairs.bottomZ - 0.35);
+    addRail(ctx, top, bottom, HANDRAIL_RADIUS);
+    addRail(ctx, placePoint(STAIRS, HANDRAIL_X, STAIRS_HEIGHT, stairs.topZ + 0.25), top, HANDRAIL_RADIUS);
+    addRail(ctx, placePoint(STAIRS, HANDRAIL_X, 0, stairs.bottomZ - 0.35), bottom, HANDRAIL_RADIUS);
   }
 
   /** Fait suivre la shadow map autour d'un point, calé sur la grille de texels pour éviter le scintillement. */
