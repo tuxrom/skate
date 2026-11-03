@@ -5,7 +5,7 @@ import { FlickRecognizer, type GestureSnapshot } from './FlickRecognizer';
  * Actions de jeu abstraites. Le gameplay ne lit jamais une touche directement :
  * il lit des actions, quelle que soit la source (clavier, manette, tactile).
  */
-export type ButtonAction = 'push' | 'ollie' | 'grab' | 'reset' | 'debug' | 'pause';
+export type ButtonAction = 'push' | 'ollie' | 'grab' | 'manual' | 'reset' | 'debug' | 'pause';
 
 export interface InputSnapshot {
   /**
@@ -23,6 +23,8 @@ export interface InputSnapshot {
    * tailgrab ne lance jamais une charge d'ollie.
    */
   grab: { x: number; y: number };
+  /** Équilibre du manual, -1 à 1 (vers l'avant positif) : flèches haut/bas avec la touche de manual, stick gauche avec LB/RB. */
+  manualAxis: number;
   /** Boutons maintenus. */
   held: ReadonlySet<ButtonAction>;
   /** Boutons pressés depuis le pas fixe précédent. */
@@ -40,6 +42,7 @@ export interface MutableSnapshot {
   move: { x: number; y: number };
   flick: { x: number; y: number };
   grab: { x: number; y: number };
+  manualAxis: number;
   held: Set<ButtonAction>;
 }
 
@@ -50,6 +53,10 @@ export interface MutableSnapshot {
 const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
   Space: 'ollie',
   KeyE: 'grab',
+  // Manual : Ctrl demandé ; C en alternative, car Ctrl+W ferme l'onglet sans que la page puisse l'empêcher.
+  ControlLeft: 'manual',
+  ControlRight: 'manual',
+  KeyC: 'manual',
   ShiftLeft: 'push',
   ShiftRight: 'push',
   KeyR: 'reset',
@@ -57,6 +64,9 @@ const KEY_BINDINGS: Readonly<Record<string, ButtonAction>> = {
   Backquote: 'debug',
   Escape: 'pause',
 };
+
+/** Codes utilisés en jeu, pour neutraliser les raccourcis Ctrl+touche que le navigateur laisse bloquer. */
+const GAME_KEYS: Readonly<Record<string, true>> = { KeyW: true, KeyA: true, KeyS: true, KeyD: true, KeyE: true, KeyR: true, Space: true };
 
 /**
  * Clavier : ZQSD/WASD pour le stick gauche, flèches pour le stick droit en repli.
@@ -91,6 +101,10 @@ export class KeyboardSource implements InputSource {
       s.grab.x = clampUnit(s.grab.x + tx);
       s.grab.y = clampUnit(s.grab.y + ty);
       tx = ty = 0;
+    } else if (this.down.has('ControlLeft') || this.down.has('ControlRight') || this.down.has('KeyC')) {
+      // Touche de manual tenue : haut/bas règlent l'équilibre au lieu de flicker.
+      s.manualAxis = clampUnit(s.manualAxis + ty);
+      tx = ty = 0;
     }
     const k = 1 - Math.exp(-INPUT.keyStickResponse * FIXED_DT);
     const cr = Math.hypot(this.stick.x, this.stick.y);
@@ -124,6 +138,8 @@ export class KeyboardSource implements InputSource {
 
   private readonly onDown = (e: KeyboardEvent): void => {
     if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'F3' || e.code === 'Tab') e.preventDefault();
+    // Raccourcis navigateur qu'une page peut bloquer (Ctrl+S, Ctrl+D, Ctrl+R...) pendant un manual.
+    if (e.ctrlKey && e.code in GAME_KEYS) e.preventDefault();
     if (e.repeat) return;
     this.down.add(e.code);
     this.tapped.add(e.code);
@@ -268,6 +284,8 @@ const PAD_BUTTONS: ReadonlyArray<readonly [number, ButtonAction]> = [
   [0, 'push'], // A / Croix
   [6, 'grab'], // LT / L2
   [7, 'grab'], // RT / R2
+  [4, 'manual'], // LB / L1
+  [5, 'manual'], // RB / R1
   [8, 'reset'], // Select / Share
   [9, 'pause'], // Start / Options
 ];
@@ -289,6 +307,8 @@ export class GamepadSource implements InputSource {
       target.x = clampUnit(target.x + (pad.axes[2] ?? 0));
       target.y = clampUnit(target.y - (pad.axes[3] ?? 0));
       for (const [index, action] of PAD_BUTTONS) if (pad.buttons[index]?.pressed) s.held.add(action);
+      // Gâchette haute de manual tenue : le stick gauche avant/arrière règle l'équilibre.
+      if (pad.buttons[4]?.pressed || pad.buttons[5]?.pressed) s.manualAxis = clampUnit(s.manualAxis - (pad.axes[1] ?? 0));
     }
   }
 
@@ -300,12 +320,13 @@ export class Input {
   readonly flickRecognizer = new FlickRecognizer();
   private readonly sources: InputSource[] = [];
   private readonly previousHeld = new Set<ButtonAction>();
-  private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, grab: { x: 0, y: 0 }, held: new Set() };
+  private readonly building: MutableSnapshot = { move: { x: 0, y: 0 }, flick: { x: 0, y: 0 }, grab: { x: 0, y: 0 }, manualAxis: 0, held: new Set() };
   private readonly snapshot: InputSnapshot = {
     move: { x: 0, y: 0 },
     flick: { x: 0, y: 0 },
     gesture: this.flickRecognizer.snapshot,
     grab: { x: 0, y: 0 },
+    manualAxis: 0,
     held: new Set(),
     pressed: new Set(),
   };
@@ -317,7 +338,7 @@ export class Input {
   /** À appeler une fois au début de chaque pas fixe. */
   poll(): InputSnapshot {
     const b = this.building;
-    b.move.x = b.move.y = b.flick.x = b.flick.y = b.grab.x = b.grab.y = 0;
+    b.move.x = b.move.y = b.flick.x = b.flick.y = b.grab.x = b.grab.y = b.manualAxis = 0;
     b.held.clear();
     for (const src of this.sources) src.sample(b);
 
@@ -328,6 +349,7 @@ export class Input {
     applyStick(b.move, this.snapshot.move);
     applyStick(b.flick, this.snapshot.flick);
     applyStick(b.grab, this.snapshot.grab);
+    this.snapshot.manualAxis = b.manualAxis;
     this.flickRecognizer.update(this.snapshot.flick.x, this.snapshot.flick.y);
     const held = this.snapshot.held as Set<ButtonAction>;
     held.clear();

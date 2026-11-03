@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { BODY, POP } from '@/config/physics';
 import type { SkaterPose, SkaterRig } from './SkaterRig';
 import { GRAB_DEFS, GRAB_ORDER, type GrabId } from './tricks';
+import { BALANCE_ORDER } from './grinds';
+import type { BalanceMoveId } from '@/config/physics';
 
 // Gabarit visuel (m). Les dimensions qui comptent pour la physique viennent de BODY.
 const WHEEL_RADIUS = 0.027;
@@ -66,6 +68,26 @@ const ARM_MAX_STRETCH = 1.2;
 /** Torsion du buste par rad/s de rotation du corps : il mène la rotation. */
 const SPIN_TWIST = 0.03;
 const SPIN_TWIST_MAX = 0.35;
+
+// Grinds et manuals (animation seule).
+interface BalancePose {
+  /** Tangage du board (rad) : positif nose levé. */
+  pitch: number;
+  /** Tangage supplémentaire par unité de jauge (rad). */
+  pitchPerBalance: number;
+  crouch: number;
+  /** Penché du buste par unité de jauge (rad). */
+  leanPerBalance: number;
+}
+const BALANCE_POSES: Readonly<Record<BalanceMoveId, BalancePose>> = {
+  fiftyFifty: { pitch: 0, pitchPerBalance: 0, crouch: 0.35, leanPerBalance: 0.45 },
+  fiveO: { pitch: 0.18, pitchPerBalance: 0, crouch: 0.4, leanPerBalance: 0.45 },
+  nosegrind: { pitch: -0.18, pitchPerBalance: 0, crouch: 0.45, leanPerBalance: 0.45 },
+  boardslide: { pitch: 0, pitchPerBalance: 0, crouch: 0.45, leanPerBalance: 0.5 },
+  lipslide: { pitch: 0, pitchPerBalance: 0, crouch: 0.45, leanPerBalance: 0.5 },
+  manual: { pitch: 0.3, pitchPerBalance: 0.12, crouch: 0.3, leanPerBalance: 0.2 },
+  noseManual: { pitch: -0.3, pitchPerBalance: 0.12, crouch: 0.4, leanPerBalance: 0.2 },
+};
 
 /** Pose de grab : point de prise sur le deck, tangage du board, flexion et torsion du buste (rad). */
 interface GrabPose {
@@ -253,8 +275,15 @@ export class ProceduralSkaterRig implements SkaterRig {
     const grabId = pose.grabIndex >= 0 ? GRAB_ORDER[pose.grabIndex]! : null;
     const g = grabId ? smooth(pose.grabAmount) : 0;
     const gp = grabId ? GRAB_POSES[grabId] : null;
-    const boardLift = GRAB_BOARD_LIFT * g;
-    const pitch = ollie.pitch + (gp ? gp.pitch * g : 0);
+    // Grind ou manual : tangage sur une paire de roues, corps penché selon la jauge.
+    const bmId = pose.balanceIndex >= 0 ? BALANCE_ORDER[pose.balanceIndex]! : null;
+    const bp = bmId ? BALANCE_POSES[bmId] : null;
+    const balancePitch = bp ? bp.pitch + bp.pitchPerBalance * pose.balance : 0;
+    // Tangage négatif (nose vers le bas) : le pivot étant aux roues arrière, on remonte le board pour
+    // que les roues avant restent sur la ligne.
+    const noseDownLift = balancePitch < 0 ? -Math.sin(balancePitch) * BODY.wheelbase : 0;
+    const boardLift = GRAB_BOARD_LIFT * g + noseDownLift;
+    const pitch = ollie.pitch + (gp ? gp.pitch * g : 0) + balancePitch;
 
     // Roulis : inclinaison, plus le déséquilibre d'une réception sale. Tangage : ollie et grab.
     this.roll.rotation.z = -(pose.lean + landing.wobble);
@@ -269,7 +298,14 @@ export class ProceduralSkaterRig implements SkaterRig {
     const contact = pushing && pose.pushPhase < 1;
     const pushWeight = pushing ? (contact ? 1 : 1 - smooth(pose.pushPhase - 1)) : 0;
     const lift = pose.feetLift;
-    const crouch = Math.max(pose.crouch, pushWeight * 0.45, pose.brake * 0.35, ollie.crouch, landing.crouch, lift * FEET_LIFT_CROUCH);
+    const crouch = Math.max(
+      pose.crouch,
+      pushWeight * 0.45,
+      pose.brake * 0.35,
+      bp ? bp.crouch : ollie.crouch,
+      landing.crouch,
+      lift * FEET_LIFT_CROUCH,
+    );
 
     // Bassin : se baisse et se décale sur le pied avant pendant la poussée, se tend au pop.
     const baseHip = lerp(lerp(HIP_HEIGHT_STAND, HIP_HEIGHT_CROUCH, crouch), HIP_HEIGHT_EXTEND, ollie.extend);
@@ -278,7 +314,8 @@ export class ProceduralSkaterRig implements SkaterRig {
     this.torso.position.copy(this.hip);
     // Buste : penché vers la zone de prise, tourné vers le nose ou le tail, et en avance sur la rotation du corps.
     const spinTwist = THREE.MathUtils.clamp(-pose.spinRate * SPIN_TWIST, -SPIN_TWIST_MAX, SPIN_TWIST_MAX);
-    const bend = pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15 + landing.wobble * 0.8 + (gp ? gp.bend * g : 0);
+    const bend =
+      pose.lean * 0.6 + crouch * 0.25 + pushWeight * 0.15 + landing.wobble * 0.8 + (gp ? gp.bend * g : 0) + (bp ? bp.leanPerBalance * pose.balance : 0);
     this.torso.rotation.set(0, (gp ? gp.twist * g : 0) + spinTwist, -bend);
 
     // Pied avant : sur le deck, il recule pendant la charge puis glisse vers le nose pour niveler.
@@ -308,7 +345,10 @@ export class ProceduralSkaterRig implements SkaterRig {
     this.solveLeg(this.foot, 1, this.backThigh, this.backShin, this.backKnee, this.backShoe);
 
     // Bras : écartés pour l'équilibre, plus en l'air, en virage serré et après une réception sale.
-    const balance = Math.min(1, Math.abs(pose.lean) * 2 + (pose.airborne ? 0.6 : 0) + pushWeight * 0.3 + ollie.extend * 0.5 + landing.flail);
+    const balance = Math.min(
+      1,
+      Math.abs(pose.lean) * 2 + (pose.airborne ? 0.6 : 0) + pushWeight * 0.3 + ollie.extend * 0.5 + landing.flail + (bp ? 0.7 + Math.abs(pose.balance) * 0.3 : 0),
+    );
     const grabHand = grabId ? GRAB_DEFS[grabId].hand : 0;
     if (g > 0 && gp) {
       // Prise sur le deck remonté, ramenée dans le repère du buste pour l'IK du bras.

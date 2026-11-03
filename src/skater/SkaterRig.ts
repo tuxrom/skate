@@ -39,6 +39,10 @@ export interface SkaterPose {
   grabAmount: number;
   /** Vitesse de rotation du corps en l'air (rad/s), positive vers la droite. */
   spinRate: number;
+  /** Grind ou manual en cours : indice dans BALANCE_ORDER, -1 sinon. */
+  balanceIndex: number;
+  /** Jauge d'équilibre (0 au centre, ±1 au bord de la zone sûre). */
+  balance: number;
 }
 
 export function createPose(): SkaterPose {
@@ -62,6 +66,8 @@ export function createPose(): SkaterPose {
     grabIndex: -1,
     grabAmount: 0,
     spinRate: 0,
+    balanceIndex: -1,
+    balance: 0,
   };
 }
 
@@ -85,6 +91,8 @@ export function copyPose(out: SkaterPose, src: SkaterPose): void {
   out.grabIndex = src.grabIndex;
   out.grabAmount = src.grabAmount;
   out.spinRate = src.spinRate;
+  out.balanceIndex = src.balanceIndex;
+  out.balance = src.balance;
 }
 
 /**

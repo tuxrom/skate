@@ -63,6 +63,8 @@ export class SkaterVisual {
     o.grabIndex = b.grabIndex >= 0 ? b.grabIndex : a.grabIndex;
     o.grabAmount = a.grabAmount + (b.grabAmount - a.grabAmount) * alpha;
     o.spinRate = b.spinRate;
+    o.balanceIndex = b.balanceIndex;
+    o.balance = a.balance + (b.balance - a.balance) * alpha;
     this.rig.update(o, dt);
   }
 }

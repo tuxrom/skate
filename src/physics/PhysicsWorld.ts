@@ -35,6 +35,10 @@ export class PhysicsWorld {
   private readonly materials = new Map<number, SurfaceMaterial>();
   private readonly ray: RAPIER.Ray;
   private probeBall: RAPIER.Ball | null = null;
+  /** Colliders « rail seulement » : on les grinde, on ne roule pas dessus. */
+  private readonly grindOnly = new Set<number>();
+  /** Filtre qui écarte les rails : sondes de sol et corps du skateur (qui ne doit jamais se poser sur un tube). */
+  readonly notGrindOnly = (c: RAPIER.Collider): boolean => !this.grindOnly.has(c.handle);
 
   constructor(readonly rapier: Rapier) {
     this.world = new rapier.World({ x: 0, y: WORLD.gravity, z: 0 });
@@ -59,18 +63,24 @@ export class PhysicsWorld {
     return collider;
   }
 
+  /** Marque un collider comme rail : les sondes de sol (`castRay` avec groundOnly) l'ignorent. */
+  markGrindOnly(collider: RAPIER.Collider): void {
+    this.grindOnly.add(collider.handle);
+  }
+
   materialOf(collider: RAPIER.Collider): SurfaceMaterial {
     return this.materials.get(collider.handle) ?? 'concrete';
   }
 
   /**
-   * Lance un rayon solide. Un départ à l'intérieur d'une forme (toi nul) n'est pas un contact
+   * Lance un rayon solide. Avec `groundOnly`, les rails sont transparents (sondes de sol). Un départ à l'intérieur d'une forme (toi nul) n'est pas un contact
    * exploitable et renvoie null.
    */
-  castRay(origin: Vec3, dir: Vec3, maxToi: number, exclude?: RAPIER.Collider): RayHit | null {
+  castRay(origin: Vec3, dir: Vec3, maxToi: number, exclude?: RAPIER.Collider, groundOnly = false): RayHit | null {
     this.ray.origin = origin;
     this.ray.dir = dir;
-    const hit = this.world.castRayAndGetNormal(this.ray, maxToi, true, undefined, undefined, exclude);
+    const filter = groundOnly ? this.notGrindOnly : undefined;
+    const hit = this.world.castRayAndGetNormal(this.ray, maxToi, true, undefined, undefined, exclude, undefined, filter);
     if (!hit || hit.timeOfImpact <= 1e-5) return null;
     const t = hit.timeOfImpact;
     return {

@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import type { SurfaceMaterial } from '@/config/physics';
 import type { PhysicsWorld } from '@/physics/PhysicsWorld';
 import type { AssetProvider, Finish, Profile } from './assets';
+import type { GrindKind, GrindNetwork } from './GrindNetwork';
+import type RAPIER from '@dimforge/rapier3d-compat';
 
 /**
  * Constructeurs de modules de skatepark. Chaque module produit son visuel (via AssetProvider)
@@ -14,6 +16,8 @@ export interface BuildContext {
   physics: PhysicsWorld;
   assets: AssetProvider;
   root: THREE.Object3D;
+  /** Lignes de grind du niveau, alimentées par les modules grindables. */
+  grinds: GrindNetwork;
 }
 
 export interface Placement {
@@ -39,17 +43,38 @@ export function addBox(
   yaw = 0,
   finish: Finish = 'park',
   material: SurfaceMaterial = 'concrete',
-): void {
+): RAPIER.Collider {
   const mesh = ctx.assets.create('box', { size, finish });
   mesh.position.set(center.x, center.y, center.z);
   mesh.rotation.y = yaw;
   ctx.root.add(mesh);
   const R = ctx.physics.rapier;
   const q = new THREE.Quaternion().setFromAxisAngle(UP, yaw);
-  ctx.physics.createStatic(
+  return ctx.physics.createStatic(
     R.ColliderDesc.cuboid(size.x / 2, size.y / 2, size.z / 2).setTranslation(center.x, center.y, center.z).setRotation(q),
     material,
   );
+}
+
+/**
+ * Box ou ledge grindable : ses arêtes supérieures le long de son grand axe (Z local) deviennent
+ * des lignes de grind. `edges` choisit les côtés : -1 côté -X local, +1 côté +X local.
+ */
+export function addLedge(
+  ctx: BuildContext,
+  center: THREE.Vector3Like,
+  size: THREE.Vector3Like,
+  yaw = 0,
+  edges: readonly (-1 | 1)[] = [-1, 1],
+  material: SurfaceMaterial = 'concrete',
+): void {
+  const collider = addBox(ctx, center, size, yaw, 'park', material);
+  const at: Placement = { x: center.x, z: center.z, yaw, y: center.y };
+  for (const side of edges) {
+    const a = placePoint(at, (side * size.x) / 2, size.y / 2, -size.z / 2);
+    const b = placePoint(at, (side * size.x) / 2, size.y / 2, size.z / 2);
+    ctx.grinds.addLine([a, b], 'ledge', material, collider);
+  }
 }
 
 export function addProfileModule(
@@ -81,8 +106,11 @@ export function addProfileModule(
   }
 }
 
-/** Quarter pipe : arc de rayon `radius` jusqu'à `height`, puis un deck plat de `deckLength`. */
-export function quarterPipe(radius: number, height: number, deckLength: number, segments: number): ProfileModule {
+/**
+ * Quarter pipe : arc de rayon `radius` jusqu'à `height`, puis un deck plat de `deckLength`.
+ * `copingZ` est la position locale du bord supérieur (coping), grindable.
+ */
+export function quarterPipe(radius: number, height: number, deckLength: number, segments: number): ProfileModule & { copingZ: number } {
   const maxAngle = Math.acos(1 - height / radius);
   const arc: [number, number][] = [];
   for (let i = 0; i <= segments; i++) {
@@ -99,7 +127,7 @@ export function quarterPipe(radius: number, height: number, deckLength: number, 
     parts.push(y0 > 1e-4 ? [[z0, 0], [z0, y0], [z1, y1], [z1, 0]] : [[z0, 0], [z1, y1], [z1, 0]]);
   }
   parts.push([[topZ, 0], [topZ, height], [backZ, height], [backZ, 0]]);
-  return { outline, parts };
+  return { outline, parts, copingZ: topZ };
 }
 
 /** Kicker : plan incliné droit, arête vive en haut. */
@@ -164,8 +192,8 @@ export function placePoint(at: Placement, x: number, y: number, z: number, out =
   return out.set(at.x + x * c + z * sn, (at.y ?? 0) + y, at.z - x * sn + z * c);
 }
 
-/** Tube métallique (rail, montant) entre deux points, avec un collider capsule. */
-export function addRail(ctx: BuildContext, a: THREE.Vector3, b: THREE.Vector3, radius: number): void {
+/** Tube métallique (rail, montant) entre deux points, avec un collider capsule. Renvoie le collider. */
+export function addRail(ctx: BuildContext, a: THREE.Vector3, b: THREE.Vector3, radius: number): RAPIER.Collider {
   const dir = new THREE.Vector3().subVectors(b, a);
   const length = dir.length();
   const q = new THREE.Quaternion().setFromUnitVectors(UP, dir.divideScalar(length));
@@ -175,7 +203,67 @@ export function addRail(ctx: BuildContext, a: THREE.Vector3, b: THREE.Vector3, r
   mesh.quaternion.copy(q);
   ctx.root.add(mesh);
   const R = ctx.physics.rapier;
-  ctx.physics.createStatic(R.ColliderDesc.capsule(length / 2, radius).setTranslation(mid.x, mid.y, mid.z).setRotation(q), 'metal');
+  return ctx.physics.createStatic(R.ColliderDesc.capsule(length / 2, radius).setTranslation(mid.x, mid.y, mid.z).setRotation(q), 'metal');
+}
+
+export interface GrindRailOptions {
+  /** 'round' : tube ; 'flat' : barre plate. */
+  shape: 'round' | 'flat';
+  /** Rayon du tube, ou demi-largeur de la barre plate (m). */
+  radius: number;
+  /** Espacement max entre deux montants (m). */
+  postSpacing: number;
+  postRadius: number;
+}
+
+/**
+ * Rail de grind posé au sol : `top` est la polyligne du dessus du rail (la ligne de grind).
+ * Crée le visuel, les colliders (marqués « rail seulement » pour les sondes de sol), les montants
+ * et la ligne de grind chaînée.
+ */
+export function addGrindRail(ctx: BuildContext, top: readonly THREE.Vector3[], opts: GrindRailOptions): void {
+  const R = ctx.physics.rapier;
+  const r = opts.radius;
+  const kind: GrindKind = opts.shape;
+  let collider: RAPIER.Collider | null = null;
+  for (let i = 0; i + 1 < top.length; i++) {
+    const a = top[i]!.clone().addScaledVector(UP, -r);
+    const b = top[i + 1]!.clone().addScaledVector(UP, -r);
+    if (opts.shape === 'round') {
+      collider = addRail(ctx, a, b, r);
+    } else {
+      const dir = new THREE.Vector3().subVectors(b, a);
+      const length = dir.length();
+      dir.divideScalar(length);
+      const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+      // Barre plate : boîte allongée le long du segment, posée à plat.
+      const yaw = Math.atan2(dir.x, dir.z);
+      const pitch = -Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+      const mesh = ctx.assets.create('box', { size: { x: 2 * r, y: 2 * r, z: length }, finish: 'metal' });
+      mesh.position.copy(mid);
+      mesh.quaternion.copy(q);
+      ctx.root.add(mesh);
+      collider = ctx.physics.createStatic(R.ColliderDesc.cuboid(r, r, length / 2).setTranslation(mid.x, mid.y, mid.z).setRotation(q), 'metal');
+    }
+    ctx.physics.markGrindOnly(collider);
+    ctx.grinds.addLine([top[i]!, top[i + 1]!], kind, 'metal', collider);
+  }
+  // Montants : aux extrémités et à intervalles réguliers, du sol jusque sous le rail.
+  const total = top.length;
+  for (let i = 0; i + 1 < total; i++) {
+    const a = top[i]!;
+    const b = top[i + 1]!;
+    const n = Math.max(1, Math.ceil(a.distanceTo(b) / opts.postSpacing));
+    for (let k = i === 0 ? 0 : 1; k <= n; k++) {
+      const p = new THREE.Vector3().lerpVectors(a, b, k / n);
+      const foot = new THREE.Vector3(p.x, 0, p.z);
+      const head = p.clone().addScaledVector(UP, -2 * r);
+      if (head.y <= 0.02) continue;
+      ctx.physics.markGrindOnly(addRail(ctx, foot, head, opts.postRadius));
+    }
+  }
+  ctx.grinds.linkEndpoints();
 }
 
 const UP = new THREE.Vector3(0, 1, 0);

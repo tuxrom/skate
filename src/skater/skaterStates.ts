@@ -32,6 +32,7 @@ const idle: SkaterState = {
   },
   update(sk, dt) {
     sk.updateLean(dt);
+    if (sk.grinding) return 'grind';
     if (!sk.grounded) return 'air';
     const ollie = ollieStart(sk);
     if (ollie) return ollie;
@@ -51,9 +52,11 @@ const riding: SkaterState = {
   },
   update(sk, dt) {
     sk.updateLean(dt);
+    if (sk.grinding) return 'grind';
     if (!sk.grounded) return 'air';
     const ollie = ollieStart(sk);
     if (ollie) return ollie;
+    if (sk.manualRequested()) return 'manual';
     if (sk.brakeRequested() && sk.speed > SKATING.stopSpeed) return 'braking';
     if (sk.pushRequested()) return 'pushing';
     if (sk.speed < SKATING.stopSpeed) return 'idle';
@@ -81,9 +84,11 @@ const pushing: SkaterState = {
   },
   update(sk, dt) {
     sk.updateLean(dt);
+    if (sk.grinding) return 'grind';
     if (!sk.grounded) return 'air';
     const ollie = ollieStart(sk);
     if (ollie) return ollie;
+    if (sk.manualRequested()) return 'manual';
     if (sk.brakeRequested()) return 'braking';
 
     const boost = sk.boostHeld();
@@ -130,6 +135,7 @@ const braking: SkaterState = {
   },
   update(sk, dt) {
     sk.updateLean(dt);
+    if (sk.grinding) return 'grind';
     if (!sk.grounded) return 'air';
     const ollie = ollieStart(sk);
     if (ollie) return ollie;
@@ -197,7 +203,73 @@ const air: SkaterState = {
   update(sk, dt) {
     sk.updateLean(dt);
     if (sk.tryCoyotePop()) return null;
-    if (sk.grounded) return sk.recovery > 0 ? 'landing' : rollingState(sk);
+    if (sk.grinding) return 'grind';
+    if (sk.grounded) {
+      // Réception propre touche de manual tenue : on enchaîne directement en manual (grind → manual).
+      if (sk.manualRequested() && (sk.recovery <= 0 || (sk.landTime === 0 && sk.lastLanding.quality === 'clean'))) return 'manual';
+      return sk.recovery > 0 ? 'landing' : rollingState(sk);
+    }
+    return null;
+  },
+};
+
+/**
+ * Grind : la simulation tient le board sur la ligne et fait évoluer la jauge (stick gauche gauche-droite).
+ * Le skateur en sort par un ollie (avec flip possible), au bout du rail, en ralentissant trop, ou en chute.
+ */
+const grind: SkaterState = {
+  id: 'grind',
+  enter(sk) {
+    sk.pushAccel = 0;
+    sk.pushPhase = -1;
+    sk.brake = 0;
+  },
+  update(sk, dt) {
+    if (!sk.grinding) return sk.grounded ? rollingState(sk) : 'air';
+    if (sk.updateGrindPop(dt)) return 'air';
+    return null;
+  },
+};
+
+/**
+ * Manual : touche tenue au sol, équilibre sur deux roues avec la même jauge (haut/bas avec la touche).
+ * Sortie en relâchant, par un ollie ou un flip (vers un grind), ou en chute si la jauge sort.
+ */
+const manual: SkaterState = {
+  id: 'manual',
+  enter(sk) {
+    sk.pushAccel = 0;
+    sk.pushPhase = -1;
+    sk.brake = 0;
+    sk.startManual();
+  },
+  exit(sk) {
+    sk.endManual('release');
+  },
+  update(sk, dt) {
+    sk.updateLean(dt);
+    if (sk.grinding) {
+      sk.endManual('air');
+      return 'grind';
+    }
+    if (!sk.grounded) {
+      sk.endManual('air');
+      return 'air';
+    }
+    const ollie = ollieStart(sk);
+    if (ollie) {
+      sk.endManual('pop');
+      return ollie;
+    }
+    if (!sk.input.held.has('manual')) return rollingState(sk);
+    if (sk.updateManual(dt)) {
+      sk.manualBail();
+      return 'landing';
+    }
+    if (sk.speed < SKATING.stopSpeed) {
+      sk.endManual('slow');
+      return 'idle';
+    }
     return null;
   },
 };
@@ -207,12 +279,14 @@ const landing: SkaterState = {
   id: 'landing',
   update(sk, dt) {
     sk.updateLean(dt);
+    if (sk.grinding) return 'grind';
     if (!sk.grounded) return 'air';
-    if (sk.recovery <= 0) return rollingState(sk);
+    // Après une chute, il faut relâcher puis réappuyer la touche de manual pour en refaire un.
+    if (sk.recovery <= 0) return sk.manualRequested() && sk.lastLanding.quality !== 'bail' ? 'manual' : rollingState(sk);
     return null;
   },
 };
 
 export function registerSkaterStates(fsm: StateMachine<SkaterStateId, Skater>): void {
-  fsm.add(idle).add(riding).add(pushing).add(braking).add(popCharge).add(pop).add(air).add(landing);
+  fsm.add(idle).add(riding).add(pushing).add(braking).add(popCharge).add(pop).add(air).add(landing).add(grind).add(manual);
 }

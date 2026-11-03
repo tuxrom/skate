@@ -286,22 +286,106 @@ export const SPIN = {
   minCountedAngle: (150 * Math.PI) / 180,
 } as const;
 
-/** Grinds et manuals. */
+/** Types de grind et de manual. Leurs réglages par type sont indexés par ces identifiants. */
+export type BalanceMoveId = 'fiftyFifty' | 'fiveO' | 'nosegrind' | 'boardslide' | 'lipslide' | 'manual' | 'noseManual';
+
+/** Grinds sur rails, ledges et bords. */
+export const GRIND = {
+  /** Distance max entre l'axe du board et la ligne de grind pour accrocher, en l'air (m). */
+  snapRadius: 0.22,
+  /** Hauteur max du board au-dessus de la ligne pour accrocher (m). */
+  snapAbove: 0.12,
+  /** Le board peut être jusqu'à cette distance sous la ligne et accrocher quand même (m). */
+  snapBelow: 0.08,
+  /**
+   * Au pas précédent, le board devait être au moins à cette hauteur relative à la ligne (m, négatif = dessous).
+   * Empêche d'accrocher un rail par en dessous.
+   */
+  fromAboveMargin: -0.03,
+  /** Distance d'accrochage au sol, seulement sur un bord de transition (coping) (m). */
+  groundSnapRadius: 0.12,
+  /** Inclinaison minimale du board au sol pour accrocher un coping (cos de l'angle avec la verticale). */
+  groundMaxUpCos: 0.7,
+  /** Vitesse le long de la ligne minimale pour accrocher (m/s). */
+  minEntrySpeed: 1.2,
+  /** Sous cette vitesse, le grind s'arrête et le board tombe du rail (m/s). */
+  minSpeed: 0.5,
+  /** La vitesse horizontale doit suivre la ligne à moins de cet angle (rad). Au-delà, on la traverse. */
+  maxApproachAngle: (60 * Math.PI) / 180,
+  /** Board à moins de cet angle de la ligne : grind sur les trucks ; au-delà : slide (rad). */
+  truckMaxAngle: (45 * Math.PI) / 180,
+  /** Marge aux extrémités d'un segment pour le point de grind (m) : on n'accroche pas un rail par son bout. */
+  endMargin: 0.08,
+  /**
+   * Recouvrement minimal entre le board et le segment pour accrocher (m). Le centre du board peut
+   * encore être avant le début du rail : c'est le cas normal quand on arrive dans l'axe.
+   */
+  minOverlap: 0.25,
+  /** Accrochage progressif : l'écart initial au rail se résorbe à ce rythme (1/s). */
+  snapResponse: 25,
+  /**
+   * Distance horizontale à une ligne de grind sous le board en dessous de laquelle l'aimantation des
+   * rotations est suspendue (m) : on doit pouvoir arriver en travers pour un slide.
+   */
+  spinMagnetSuspendRadius: 0.6,
+  /** Après une sortie, le même segment est ignoré pendant ce délai (s). */
+  reentryDelay: 0.35,
+  /** Multiplicateur de la friction du matériau selon le type de grind. */
+  typeFriction: {
+    fiftyFifty: 1,
+    fiveO: 1.35,
+    nosegrind: 1.25,
+    boardslide: 1.5,
+    lipslide: 1.5,
+    manual: 1,
+    noseManual: 1,
+  } satisfies Record<BalanceMoveId, number>,
+  /** Traînée aérodynamique pendant un grind (1/m), comme au sol. */
+  airDrag: 0.0045,
+  /** Vitesse de sortie latérale d'une chute de grind, du côté du déséquilibre (m/s). */
+  bailSideSpeed: 1.2,
+} as const;
+
+/** Manuals. */
+export const MANUAL = {
+  /** Vitesse minimale pour entrer en manual (m/s). */
+  minSpeed: 1.0,
+  /** Résistance au roulement supplémentaire sur deux roues (multiplicateur). */
+  rollingMultiplier: 1.4,
+} as const;
+
+/**
+ * Jauge d'équilibre commune aux grinds et aux manuals, normalisée : 0 au centre, ±limit au bord.
+ * Dynamique instable : b' = drift·(1 + driftGrowth·t)·b + perturbation(t) + correction·stick.
+ * Sans correction, la jauge sort de la zone sûre en 1 à 2 s.
+ */
 export const BALANCE = {
-  /** Distance max de capture d'un rail ou d'un rebord (m). */
-  grindSnapDistance: 0.35,
-  /** Angle max entre la planche et le rail pour accrocher (rad). */
-  grindSnapAngle: 0.9,
-  /** Vitesse minimale pour tenir un grind (m/s). */
-  grindMinSpeed: 1.5,
-  /** Vitesse de dérive naturelle de l'équilibre (unités normalisées/s). */
-  balanceDrift: 0.6,
-  /** Effet d'une correction du joueur sur l'équilibre (unités normalisées/s). */
-  balanceCorrection: 1.8,
-  /** Seuil d'équilibre normalisé au-delà duquel on tombe (|x| > seuil). */
-  balanceLimit: 1.0,
-  /** Accélération de la dérive avec la durée tenue (multiplicateur par seconde). */
-  balanceDriftGrowth: 0.15,
+  /** Divergence de la jauge (1/s) : plus elle est décentrée, plus elle part vite. */
+  drift: 1.4,
+  /** Croissance de la divergence avec la durée tenue (par seconde). */
+  driftGrowth: 0.25,
+  /** Effet du stick à fond sur la jauge (unités/s). */
+  correction: 2.4,
+  /** Bord de la zone sûre ; au-delà, chute. */
+  limit: 1.0,
+  /** Début de la zone d'alerte, pour l'affichage. */
+  warnZone: 0.7,
+  /** Amplitude de la perturbation pseudo-aléatoire (unités/s). */
+  perturbAmplitude: 0.5,
+  /** Fréquence de base de la perturbation (Hz). */
+  perturbFrequency: 0.9,
+  /** Décentrage initial à l'entrée, du côté de l'approche (unités). */
+  startOffset: 0.08,
+  /** Difficulté par type : multiplie la divergence. */
+  difficulty: {
+    fiftyFifty: 1,
+    fiveO: 1.2,
+    nosegrind: 1.3,
+    boardslide: 0.9,
+    lipslide: 1.0,
+    manual: 1.1,
+    noseManual: 1.25,
+  } satisfies Record<BalanceMoveId, number>,
 } as const;
 
 /** Seuils de chute. */

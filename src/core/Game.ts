@@ -9,6 +9,8 @@ import type { AssetProvider } from '@/world/assets';
 import { Skater, type ActiveTrick, type LandingInfo } from '@/skater/Skater';
 import { trickName } from '@/skater/tricks';
 import { FlickDebugPanel } from '@/ui/FlickDebugPanel';
+import { BalanceMeter } from '@/ui/BalanceMeter';
+import { BALANCE_MOVES } from '@/skater/grinds';
 import { SkaterVisual } from '@/skater/SkaterVisual';
 import { AudioEngine } from '@/audio/AudioEngine';
 import { DebugOverlay } from '@/ui/DebugOverlay';
@@ -41,6 +43,12 @@ export class Game {
   private readonly debug: DebugOverlay;
   private readonly pauseOverlay: PauseOverlay;
   private readonly flickPanel: FlickDebugPanel;
+  private readonly balanceMeter: BalanceMeter;
+  /** Dernier grind ou manual terminé, pour le debug (les combos de l'étape 7 s'en serviront). */
+  private lastBalanceText = '-';
+  private balanceMoves = 0;
+  /** Dernières fins de grind et de manual (debug). */
+  private readonly balanceLog: string[] = [];
   private readonly loop: GameLoop;
   private readonly dust = new DustEffect();
 
@@ -80,12 +88,21 @@ export class Game {
     this.level = new Level(this.scene, this.physics, opts.assets);
 
     this.skater = new Skater(this.physics);
+    this.skater.grinds = this.level.grinds;
     this.skaterVisual = new SkaterVisual(this.skater, opts.assets.createSkater());
     this.scene.add(this.skaterVisual.object);
     this.scene.add(this.dust.object);
     this.skater.events = {
       pop: (charge, position, trick) => this.onPop(charge, position, trick),
       land: (info) => this.onLand(info),
+      balanceStart: () => {
+        this.balanceMoves++;
+      },
+      balanceEnd: (move, time, distance, reason) => {
+        this.lastBalanceText = `${BALANCE_MOVES[move].name} ${time.toFixed(2)} s, ${distance.toFixed(1)} m, ${reason}`;
+        this.balanceLog.push(this.lastBalanceText);
+        if (this.balanceLog.length > 8) this.balanceLog.shift();
+      },
     };
 
     const exclude = this.skater.bodyCollider;
@@ -100,6 +117,7 @@ export class Game {
     this.debug = new DebugOverlay(opts.container, opts.debug);
     this.pauseOverlay = new PauseOverlay(opts.container);
     this.flickPanel = new FlickDebugPanel(opts.container, opts.debug);
+    this.balanceMeter = new BalanceMeter(opts.container);
     this.loop = new GameLoop(
       {
         fixedUpdate: (dt) => this.fixedUpdate(dt),
@@ -171,6 +189,16 @@ export class Game {
       gestureEnd: this.input.flickRecognizer.lastEvent?.features.endAngle ?? 0,
       gestureMinR: this.input.flickRecognizer.lastEvent?.features.minRadius ?? 0,
       gestureDuration: this.input.flickRecognizer.lastEvent?.features.duration ?? 0,
+      grinding: sk.grinding,
+      grindReject: sk.grindReject,
+      balanceMove: sk.balanceMove ?? '',
+      balance: sk.balance,
+      grindSpeed: sk.grind.speed,
+      grindSegment: sk.grinding ? sk.grind.segment!.index : -1,
+      grindKind: sk.grinding ? sk.grind.segment!.kind : '',
+      balanceMoves: this.balanceMoves,
+      lastBalance: this.lastBalanceText,
+      balanceLog: this.balanceLog.join(' | '),
       spinAngle: sk.spinAngle,
       spinRate: sk.spinRate,
       grab: sk.grabId ?? '',
@@ -305,10 +333,12 @@ export class Game {
       pos: `${sk.position.x.toFixed(1)} ${sk.position.y.toFixed(2)} ${sk.position.z.toFixed(1)}`,
       charge: sk.charge > 0 ? `${(sk.charge * 100).toFixed(0)} %` : '-',
       trick: this.lastTrickText,
+      grind: sk.balanceMove ? `${BALANCE_MOVES[sk.balanceMove].name} jauge ${sk.balance.toFixed(2)}` : this.lastBalanceText,
       air: sk.grounded ? '-' : `rot ${((sk.spinAngle * 180) / Math.PI).toFixed(0)}°  grab ${sk.grabId ?? '-'} ${(sk.grabAmount * 100).toFixed(0)} %`,
       land: this.lastLandingText,
     });
     this.flickPanel.update(this.input.flickRecognizer, this.lastFlickX, this.lastFlickY);
+    this.balanceMeter.update(sk.balanceMove ? BALANCE_MOVES[sk.balanceMove].name : null, sk.balance);
   }
 
   private readonly onVisibility = (): void => {

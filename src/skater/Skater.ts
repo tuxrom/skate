@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
-import { BAIL, BODY, GRAB, GROUND, INPUT, LANDING, MATERIALS, POP, SKATING, SPIN, TRICKS, WORLD, type SurfaceMaterial } from '@/config/physics';
+import { BAIL, BALANCE, BODY, GRAB, GRIND, GROUND, INPUT, LANDING, MANUAL, MATERIALS, POP, SKATING, SPIN, TRICKS, WORLD, type BalanceMoveId, type SurfaceMaterial } from '@/config/physics';
 import type { PhysicsWorld, RayHit } from '@/physics/PhysicsWorld';
 import type { PoseSource } from '@/physics/InterpolatedBody';
 import type { InputSnapshot } from '@/core/Input';
 import type { FlickEvent } from '@/core/FlickRecognizer';
 import { GRAB_ORDER, TRICK_DEFS, comboName, grabFromDirection, type GrabId, type TrickId } from './tricks';
+import { BALANCE_MOVES, BALANCE_ORDER, chooseGrind, type GrindTypeId, type ManualTypeId } from './grinds';
+import type { GrindNetwork, GrindQuery, GrindSegment } from '@/world/GrindNetwork';
 import { StateMachine } from './StateMachine';
 import type { SkaterStateId } from './states';
 import { registerSkaterStates } from './skaterStates';
@@ -23,6 +25,8 @@ const HALF_WHEELBASE = BODY.wheelbase / 2;
 
 const MAX_LANDING_COS_UP = Math.cos(GROUND.maxLandingAngle);
 const COS_LANDING_SURFACE = Math.cos(GROUND.maxLandingSurfaceAngle);
+/** Portée de recherche d'une ligne sous le board en l'air (m) : couvre toute la hauteur d'un saut. */
+const RAIL_BELOW_SEARCH = 2.5;
 
 /** Qualité d'une réception. 'bail' dépasse les seuils de chute ; les chutes arrivent à l'étape 6. */
 export type LandingQuality = 'clean' | 'sloppy' | 'bail';
@@ -59,8 +63,15 @@ export interface LandingInfo {
 }
 
 /** Écouteurs des événements ponctuels du skateur (son, particules, caméra). */
+/** Raison de fin d'un grind ou d'un manual. */
+export type BalanceEndReason = 'end' | 'pop' | 'slow' | 'bail' | 'blocked' | 'release' | 'air';
+
 export interface SkaterEvents {
   pop?(charge: number, position: THREE.Vector3, trick: ActiveTrick): void;
+  /** Début d'un grind ou d'un manual. */
+  balanceStart?(move: BalanceMoveId): void;
+  /** Fin d'un grind ou d'un manual : durée (s) et distance parcourue (m), pour les combos. */
+  balanceEnd?(move: BalanceMoveId, time: number, distance: number, reason: BalanceEndReason): void;
   land?(info: LandingInfo): void;
 }
 
@@ -106,6 +117,7 @@ const EMPTY_INPUT: InputSnapshot = {
   flick: { x: 0, y: 0 },
   gesture: { charging: false, flicking: false, event: null, cancelled: false },
   grab: { x: 0, y: 0 },
+  manualAxis: 0,
   held: new Set(),
   pressed: new Set(),
 };
@@ -179,6 +191,46 @@ export class Skater implements PoseSource {
   spinRate = 0;
   /** Multiple de 180° visé par l'aimantation, verrouillé une fois choisi (NaN tant qu'aucun). */
   private spinSnapTarget = Number.NaN;
+
+  // Grinds et manuals.
+  /** Lignes de grind du niveau, fournies par Game. */
+  grinds: GrindNetwork | null = null;
+  grinding = false;
+  /** Grind en cours : segment, abscisse (m depuis a), vitesse signée le long du segment. */
+  readonly grind = {
+    segment: null as GrindSegment | null,
+    t: 0,
+    speed: 0,
+    type: 'fiftyFifty' as GrindTypeId,
+    time: 0,
+    distance: 0,
+    /** Charge d'ollie en cours pendant le grind, -1 sinon. */
+    charge: -1,
+  };
+  /** Grind ou manual en cours (type d'équilibre), null sinon. */
+  balanceMove: BalanceMoveId | null = null;
+  /** Jauge d'équilibre : 0 au centre, ±BALANCE.limit au bord de la zone sûre. */
+  balance = 0;
+  private balanceTime = 0;
+  private balanceSeed = 0;
+  private manualDistance = 0;
+  private readonly grindOffset = new THREE.Vector3();
+  private lastGrindSegment: GrindSegment | null = null;
+  private lastGrindExit = -Infinity;
+  /** La prochaine réception est une chute (sortie de grind ratée). */
+  private forcedBail = false;
+  private grindOnGround = false;
+  private readonly prevPosition = new THREE.Vector3();
+  private readonly boardA = new THREE.Vector3();
+  private readonly boardB = new THREE.Vector3();
+  private readonly grindTarget = new THREE.Vector3();
+  private readonly grindQuery: GrindQuery = {
+    segment: null as unknown as GrindSegment,
+    t: 0,
+    railPoint: new THREE.Vector3(),
+    boardPoint: new THREE.Vector3(),
+    distance: 0,
+  };
 
   // Grab.
   /** Grab en cours ou en train d'être lâché, null sinon. */
@@ -315,6 +367,10 @@ export class Skater implements PoseSource {
     this.grabAmount = 0;
     this.grabId = null;
     this.pendingFlick = null;
+    this.grinding = false;
+    this.balanceMove = null;
+    this.forcedBail = false;
+    this.lastGrindSegment = null;
     this.trick.landedProgress = 1;
     this.trick.flips = this.trick.shove = 0;
     this.prediction.valid = false;
@@ -496,7 +552,8 @@ export class Skater implements PoseSource {
     this.tuck = input.move.y > INPUT.tuckThreshold;
     this.fsm.update(dt);
 
-    if (this.grounded) this.groundStep(dt);
+    if (this.grinding) this.grindStep(dt);
+    else if (this.grounded) this.groundStep(dt);
     else this.airStep(dt);
 
     const k = 1 - Math.exp(-GROUND.upSmoothing * dt);
@@ -533,7 +590,8 @@ export class Skater implements PoseSource {
     // Résistances : roulement, air, frein, survitesse. Elles freinent sans jamais inverser le sens.
     const s = v.length();
     const drag = SKATING.airDrag * (this.tuck ? SKATING.tuckDragMultiplier : 1);
-    let decel = mat.rollingResistance * normalLoad + drag * s * s + this.brake * SKATING.brakeDecel;
+    const rolling = mat.rollingResistance * (this.isManual() ? MANUAL.rollingMultiplier : 1);
+    let decel = rolling * normalLoad + drag * s * s + this.brake * SKATING.brakeDecel;
     if (s > SKATING.maxSpeed * mat.speedMultiplier) decel += SKATING.overSpeedDecel;
     if (s > 0) v.multiplyScalar(Math.max(0, s - decel * dt) / s);
 
@@ -550,6 +608,8 @@ export class Skater implements PoseSource {
     this.resolveBoardObstacles(dt);
     this.moveBody(dt);
     this.followGround();
+    // Au sol, seul un coping (bord de transition) s'accroche, quand on arrive en haut de la rampe.
+    if (this.grounded) this.tryStartGrind(true);
   }
 
   /**
@@ -558,6 +618,7 @@ export class Skater implements PoseSource {
    */
   private airStep(dt: number): void {
     const v = this.velocity;
+    this.prevPosition.copy(this.position);
     this.airTime += dt;
     if (this.trick.landedProgress < 0) this.trick.time += dt;
     v.addScaledVector(GRAVITY, dt);
@@ -567,7 +628,7 @@ export class Skater implements PoseSource {
       this.predictionCountdown = POP.predictionInterval;
     }
     this.updateGrab(dt);
-    this.updateSpin(dt);
+    this.updateSpin(dt, this.railBelow());
 
     const p = this.prediction;
     const alignTo = p.valid && p.normal.dot(WORLD_UP) >= MAX_LANDING_COS_UP ? p.normal : WORLD_UP;
@@ -581,15 +642,397 @@ export class Skater implements PoseSource {
 
     this.resolveBoardObstacles(dt);
     this.moveBody(dt);
+    if (this.tryStartGrind(false)) return;
     this.tryLand(dt);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Grinds.
+
+  /**
+   * Cherche une ligne de grind sous l'axe du board (capsule queue-nez) et accroche si tout concorde.
+   * Filtres contre les accrochages fantômes : hauteur et distance, arrivée par le dessus, pas par un bout,
+   * vitesse le long de la ligne, et rayon de visibilité libre entre le board et la ligne.
+   */
+  private tryStartGrind(onGround: boolean): boolean {
+    if (!this.grinds || this.recovery > 0) return false;
+    // Board pas rattrapé après un flip, ou main encore sur le board : pas d'accrochage.
+    if (this.trick.landedProgress < 0 && this.boardResidual() > TRICKS.landFlipTolerance) return false;
+    if (this.grabAmount > GRAB.landSloppyAmount) return false;
+    this.boardA.copy(this.position).addScaledVector(this.forward, -HALF_BOARD);
+    this.boardB.copy(this.position).addScaledVector(this.forward, HALF_BOARD);
+    this.grindOnGround = onGround;
+    const reach = onGround ? GRIND.groundSnapRadius : Math.max(GRIND.snapRadius, GRIND.snapAbove);
+    if (!this.grinds.closest(this.boardA, this.boardB, reach, this.grindQuery, this.acceptGrind)) return false;
+    this.startGrind(this.grindQuery);
+    return true;
+  }
+
+  private readonly acceptGrind = (q: GrindQuery): boolean => {
+    const seg = q.segment;
+    if (seg === this.lastGrindSegment && this.time - this.lastGrindExit < GRIND.reentryDelay) return this.rejectGrind('reentry');
+    // Board dans l'axe : il doit recouvrir le segment. Board en travers (slide) : son centre doit être
+    // au-dessus du segment. Le point de grind est ensuite recalé dans les marges.
+    if (seg.length < 2 * GRIND.endMargin) return this.rejectGrind('end');
+    const ta = this.tmpA.subVectors(this.boardA, seg.a).dot(seg.dir);
+    const tb = this.tmpA.subVectors(this.boardB, seg.a).dot(seg.dir);
+    const alongRail = Math.abs(ta - tb) / (2 * HALF_BOARD) >= Math.cos(GRIND.truckMaxAngle);
+    if (alongRail) {
+      const overlap = Math.min(seg.length, Math.max(ta, tb)) - Math.max(0, Math.min(ta, tb));
+      if (overlap < GRIND.minOverlap) return this.rejectGrind('end');
+    } else {
+      const tc = (ta + tb) / 2;
+      if (tc < GRIND.endMargin || tc > seg.length - GRIND.endMargin) return this.rejectGrind('end');
+    }
+    q.t = THREE.MathUtils.clamp(q.t, GRIND.endMargin, seg.length - GRIND.endMargin);
+    q.railPoint.copy(seg.a).addScaledVector(seg.dir, q.t);
+    const dy = q.boardPoint.y - q.railPoint.y;
+    if (dy > GRIND.snapAbove || dy < -GRIND.snapBelow) return this.rejectGrind('height');
+    const dh = Math.hypot(q.boardPoint.x - q.railPoint.x, q.boardPoint.z - q.railPoint.z);
+    if (this.grindOnGround) {
+      if (seg.kind !== 'coping' || this.up.dot(WORLD_UP) > GRIND.groundMaxUpCos || dh > GRIND.groundSnapRadius) return this.rejectGrind('ground');
+    } else {
+      if (dh > GRIND.snapRadius) return this.rejectGrind('radius');
+      // Le même point du board était au-dessus de la ligne au pas précédent : on arrive par le dessus.
+      const prevDy = this.prevPosition.y + (q.boardPoint.y - this.position.y) - q.railPoint.y;
+      if (prevDy < GRIND.fromAboveMargin) return this.rejectGrind('below');
+    }
+    // La vitesse horizontale suit la ligne : on ne la traverse pas.
+    const v = this.velocity;
+    const dirH = Math.hypot(seg.dir.x, seg.dir.z);
+    const vH = Math.hypot(v.x, v.z);
+    if (dirH < 1e-3 || vH < 1e-3) return this.rejectGrind('degenerate');
+    const along = (v.x * seg.dir.x + v.z * seg.dir.z) / dirH;
+    if (Math.abs(along) < GRIND.minEntrySpeed || Math.abs(along) < vH * Math.cos(GRIND.maxApproachAngle)) return this.rejectGrind('approach');
+    // Rien entre le board et la ligne (mur, autre module).
+    setVec(this.rayOrigin, this.position.x, this.position.y + 0.15, this.position.z);
+    const tx = q.railPoint.x - this.rayOrigin.x;
+    const ty = q.railPoint.y + 0.03 - this.rayOrigin.y;
+    const tz = q.railPoint.z - this.rayOrigin.z;
+    const dist = Math.hypot(tx, ty, tz);
+    if (dist > 1e-3) {
+      setVec(this.rayDir, tx / dist, ty / dist, tz / dist);
+      const hit = this.physics.castRay(this.rayOrigin, this.rayDir, dist, this.collider);
+      if (hit && hit.collider !== seg.collider && hit.toi < dist - 0.02) return this.rejectGrind('los');
+    }
+    return true;
+  };
+
+  /** Dernière raison de refus d'accrochage, pour le debug. */
+  grindReject = '';
+  private rejectGrind(reason: string): false {
+    this.grindReject = reason;
+    return false;
+  }
+
+  /** Accrochage : choix du grind, orientation du board, écart initial gardé puis résorbé (pas de téléportation). */
+  private startGrind(q: GrindQuery): void {
+    const seg = q.segment;
+    const g = this.grind;
+    const s = this.velocity.dot(seg.dir);
+    const dirH = this.tmpA.set(seg.dir.x, 0, seg.dir.z).normalize();
+    const fH = this.tmpB.set(this.forward.x, 0, this.forward.z);
+    if (fH.lengthSq() < 1e-8) fH.copy(dirH);
+    fH.normalize();
+    const angle = Math.acos(THREE.MathUtils.clamp(Math.abs(fH.dot(dirH)), 0, 1));
+    const type = chooseGrind(angle <= GRIND.truckMaxAngle, this.input.move.y);
+    g.segment = seg;
+    g.t = q.t;
+    g.speed = s;
+    g.type = type;
+    g.time = 0;
+    g.distance = 0;
+    g.charge = -1;
+    this.orientOnSegment(seg, Math.sign(s) || 1);
+    this.computeGrindTarget(this.grindTarget);
+    this.grindOffset.subVectors(this.position, this.grindTarget);
+    this.grinding = true;
+    this.grounded = false;
+    this.velocity.copy(seg.dir).multiplyScalar(s);
+    this.pushAccel = 0;
+    this.brake = 0;
+    this.grabAmount = 0;
+    this.grabId = null;
+    this.startBalance(type);
+    this.events.balanceStart?.(type);
+  }
+
+  /**
+   * Oriente le board sur le segment. Trucks : dans l'axe, sens le plus proche du cap actuel, incliné avec
+   * la pente. Slides : en travers ; boardslide = côté orteils vers l'avant de la marche, lipslide = côté talons.
+   */
+  private orientOnSegment(seg: GrindSegment, travel: number): void {
+    const def = BALANCE_MOVES[this.grind.type];
+    if (def.onTrucks) {
+      const sign = this.forward.dot(seg.dir) >= 0 ? 1 : -1;
+      this.forward.copy(seg.dir).multiplyScalar(sign);
+      this.up.copy(WORLD_UP).addScaledVector(seg.dir, -WORLD_UP.dot(seg.dir)).normalize();
+    } else {
+      const perp = this.tmpC.crossVectors(seg.dir, WORLD_UP).normalize();
+      this.forward.copy(perp);
+      this.up.copy(WORLD_UP);
+      // Côté orteils = forward × up ; il doit regarder vers la marche pour un boardslide.
+      const toe = this.right.crossVectors(this.forward, this.up);
+      const facing = toe.x * seg.dir.x * travel + toe.y * seg.dir.y * travel + toe.z * seg.dir.z * travel;
+      const wantFacing = this.grind.type === 'boardslide' ? 1 : -1;
+      if (facing * wantFacing < 0) this.forward.negate();
+    }
+  }
+
+  /** Position du board sur la ligne : point de grind, descendu de la hauteur de contact, décalé le long du board. */
+  private computeGrindTarget(out: THREE.Vector3): THREE.Vector3 {
+    const g = this.grind;
+    const seg = g.segment!;
+    const def = BALANCE_MOVES[g.type];
+    return out
+      .copy(seg.a)
+      .addScaledVector(seg.dir, g.t)
+      .addScaledVector(this.up, -def.drop)
+      .addScaledVector(this.forward, def.alongShift);
+  }
+
+  /**
+   * Pas de grind : la pente accélère, la friction du matériau (pondérée par le type) freine,
+   * on suit la ligne et ses segments chaînés, la jauge d'équilibre évolue.
+   */
+  private grindStep(dt: number): void {
+    const g = this.grind;
+    let seg = g.segment!;
+    const fr = MATERIALS[seg.material].grindFriction * GRIND.typeFriction[g.type];
+    let s = g.speed + GRAVITY.dot(seg.dir) * dt;
+    const sign = s >= 0 ? 1 : -1;
+    s -= sign * Math.min(Math.abs(s), (fr + GRIND.airDrag * s * s) * dt);
+    g.speed = s;
+    if (Math.abs(s) < GRIND.minSpeed) {
+      this.velocity.copy(seg.dir).multiplyScalar(s);
+      this.exitGrind('slow');
+      return;
+    }
+
+    // Obstacle devant (mur, module) : on sort du grind en butant.
+    const step = s * dt;
+    setVec(this.rayOrigin, this.position.x + this.up.x * 0.15, this.position.y + this.up.y * 0.15, this.position.z + this.up.z * 0.15);
+    setVec(this.rayDir, seg.dir.x * sign, seg.dir.y * sign, seg.dir.z * sign);
+    const block = this.physics.castRay(this.rayOrigin, this.rayDir, Math.abs(step) + HALF_BOARD, this.collider);
+    if (block && block.collider !== seg.collider) {
+      this.velocity.copy(seg.dir).multiplyScalar(s * 0.3);
+      this.exitGrind('blocked');
+      return;
+    }
+
+    let t = g.t + step;
+    while (t > seg.length) {
+      if (!seg.next) {
+        this.computeExitPosition(seg, seg.length);
+        this.velocity.copy(seg.dir).multiplyScalar(s);
+        this.exitGrind('end');
+        return;
+      }
+      t -= seg.length;
+      seg = seg.next;
+    }
+    while (t < 0) {
+      if (!seg.prev) {
+        this.computeExitPosition(seg, 0);
+        this.velocity.copy(seg.dir).multiplyScalar(s);
+        this.exitGrind('end');
+        return;
+      }
+      seg = seg.prev;
+      t += seg.length;
+    }
+    if (seg !== g.segment) {
+      g.segment = seg;
+      this.orientOnSegment(seg, sign);
+    }
+    g.t = t;
+    g.time += dt;
+    g.distance += Math.abs(step);
+
+    this.computeGrindTarget(this.grindTarget);
+    this.grindOffset.multiplyScalar(Math.exp(-GRIND.snapResponse * dt));
+    this.position.copy(this.grindTarget).add(this.grindOffset);
+    this.velocity.copy(seg.dir).multiplyScalar(s);
+    // L'inclinaison visuelle suit la jauge.
+    this.lean = this.balance * SKATING.leanMax;
+
+    if (this.updateBalance(dt, this.input.move.x)) this.exitGrind('bail');
+  }
+
+  /** Position de sortie au bout d'un segment : le board quitte la ligne là où il est. */
+  private computeExitPosition(seg: GrindSegment, t: number): void {
+    const def = BALANCE_MOVES[this.grind.type];
+    this.position.copy(seg.a).addScaledVector(seg.dir, t).addScaledVector(this.up, -def.drop).addScaledVector(this.forward, def.alongShift);
+  }
+
+  /**
+   * Fin de grind : le board repart en l'air avec sa vitesse. Une chute pousse le skateur du côté
+   * du déséquilibre et force une réception en chute.
+   */
+  private exitGrind(reason: BalanceEndReason): void {
+    const g = this.grind;
+    const seg = g.segment!;
+    this.events.balanceEnd?.(g.type, g.time, g.distance, reason);
+    this.lastGrindSegment = seg;
+    this.lastGrindExit = this.time;
+    this.grinding = false;
+    this.balanceMove = null;
+    g.charge = -1;
+    // Le board quitte la ligne à plat : sur un rail en pente, il ne garde pas l'inclinaison du rail
+    // (le lissage visuel de l'orientation évite le saut à l'écran).
+    this.up.copy(WORLD_UP);
+    orthonormalize(this.forward, this.up);
+    // Sortie de slide : le board se remet dans l'axe de la marche, nose devant.
+    if (!BALANCE_MOVES[g.type].onTrucks) {
+      const travel = Math.sign(g.speed) || 1;
+      this.forward.copy(seg.dir).multiplyScalar(travel);
+      orthonormalize(this.forward, this.up);
+    }
+    if (reason === 'bail') {
+      this.forcedBail = true;
+      const side = this.tmpA.crossVectors(seg.dir, WORLD_UP).normalize();
+      this.velocity.addScaledVector(side, -Math.sign(this.balance || 1) * GRIND.bailSideSpeed);
+    }
+    this.leaveGround();
+  }
+
+  /**
+   * Ollie pendant un grind : charge puis pop, avec le trick du geste s'il y en a un (flip de sortie).
+   * Renvoie vrai si le skateur a quitté le rail.
+   */
+  updateGrindPop(dt: number): boolean {
+    const g = this.grind;
+    if (g.charge < 0) {
+      const source = this.ollieStartRequested();
+      if (source === 'buffered') {
+        this.startBufferedPop();
+        this.popFromGrind();
+        return true;
+      }
+      if (source) {
+        this.startCharge(source);
+        g.charge = 0;
+      }
+      return false;
+    }
+    this.updateCharge(dt);
+    const release = this.ollieReleaseRequested();
+    if (release === 'pop') {
+      this.popFromGrind();
+      return true;
+    }
+    if (release === 'cancel') {
+      this.cancelCharge();
+      g.charge = -1;
+    }
+    return false;
+  }
+
+  private popFromGrind(): void {
+    const charge = this.charge;
+    this.exitGrind('pop');
+    this.up.copy(WORLD_UP);
+    this.performPop(charge);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Jauge d'équilibre (grinds et manuals).
+
+  private startBalance(move: BalanceMoveId): void {
+    this.balanceMove = move;
+    this.balanceTime = 0;
+    this.balanceSeed = (this.time * 7.31) % (2 * Math.PI);
+    // Léger décentrage initial, d'un côté qui varie d'une fois sur l'autre.
+    this.balance = BALANCE.startOffset * (Math.sin(this.time * 13.7) >= 0 ? 1 : -1);
+  }
+
+  /** Fait évoluer la jauge ; renvoie vrai si elle sort de la zone sûre. */
+  private updateBalance(dt: number, axis: number): boolean {
+    const move = this.balanceMove;
+    if (!move) return false;
+    this.balanceTime += dt;
+    const drift = BALANCE.drift * BALANCE.difficulty[move] * (1 + BALANCE.driftGrowth * this.balanceTime) * this.balance;
+    const w = 2 * Math.PI * BALANCE.perturbFrequency * this.balanceTime + this.balanceSeed;
+    const perturb = BALANCE.perturbAmplitude * (Math.sin(w) + 0.5 * Math.sin(2.3 * w + 1.7));
+    this.balance += (drift + perturb + axis * BALANCE.correction) * dt;
+    return Math.abs(this.balance) > BALANCE.limit;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Manuals.
+
+  isManual(): boolean {
+    return this.balanceMove === 'manual' || this.balanceMove === 'noseManual';
+  }
+
+  manualRequested(): boolean {
+    return this.input.held.has('manual') && this.speed >= MANUAL.minSpeed;
+  }
+
+  /** Entrée en manual : nose manual si l'équilibre est poussé vers l'avant à l'entrée. */
+  startManual(): void {
+    const type: ManualTypeId = this.input.manualAxis > 0.5 ? 'noseManual' : 'manual';
+    this.manualDistance = 0;
+    this.recovery = 0;
+    this.startBalance(type);
+    this.events.balanceStart?.(type);
+  }
+
+  /** Pas de manual : renvoie vrai si la jauge sort de la zone sûre. */
+  updateManual(dt: number): boolean {
+    this.manualDistance += this.speed * dt;
+    return this.updateBalance(dt, this.input.manualAxis);
+  }
+
+  endManual(reason: BalanceEndReason): void {
+    const move = this.balanceMove;
+    if (!move) return;
+    this.events.balanceEnd?.(move, this.balanceTime, this.manualDistance, reason);
+    this.balanceMove = null;
+  }
+
+  /** Manual raté : les roues avant (ou arrière) claquent, le skateur perd l'équilibre comme à une réception en chute. */
+  manualBail(): void {
+    this.endManual('bail');
+    this.velocity.multiplyScalar(LANDING.bailSpeedRetention);
+    this.recovery = LANDING.bailRecovery;
+    const info = this.lastLanding;
+    info.quality = 'bail';
+    info.impactSpeed = 0;
+    info.label = 'Manual';
+    info.position.copy(this.position);
+    info.normal.copy(this.up);
+    this.landTime = 0;
+    this.events.land?.(info);
   }
 
   /**
    * Rotation du corps : le stick gauche fait monter la vitesse de rotation, relâché elle continue
    * sur son élan en ralentissant. Dans les SPIN.snapLead dernières secondes avant la réception prévue,
    * l'angle est aimanté vers le multiple de 180° que la rotation atteindrait sur son élan, s'il en est assez près.
+   * L'aimantation est suspendue au-dessus d'une ligne de grind, pour pouvoir arriver en travers (slides).
    */
-  private updateSpin(dt: number): void {
+  /** Vrai si une ligne de grind passe sous le board, à portée : un slide peut se préparer. */
+  private railBelow(): boolean {
+    if (!this.grinds) return false;
+    this.boardA.copy(this.position).addScaledVector(this.forward, -HALF_BOARD);
+    this.boardB.copy(this.position).addScaledVector(this.forward, HALF_BOARD);
+    return this.grinds.closest(this.boardA, this.boardB, RAIL_BELOW_SEARCH, this.nearQuery, this.acceptBelow);
+  }
+
+  private readonly nearQuery: GrindQuery = {
+    segment: null as unknown as GrindSegment,
+    t: 0,
+    railPoint: new THREE.Vector3(),
+    boardPoint: new THREE.Vector3(),
+    distance: 0,
+  };
+  /** Ligne sous le board : le board est au-dessus, à moins de spinMagnetSuspendRadius à l'horizontale. */
+  private readonly acceptBelow = (q: GrindQuery): boolean =>
+    q.boardPoint.y - q.railPoint.y > -GRIND.snapBelow &&
+    Math.hypot(q.boardPoint.x - q.railPoint.x, q.boardPoint.z - q.railPoint.z) <= GRIND.spinMagnetSuspendRadius;
+
+  private updateSpin(dt: number, suspendMagnet: boolean): void {
     const x = this.input.move.x;
     const maxRate = SPIN.maxRate * (this.grabAmount > 0 ? GRAB.spinRateMultiplier : 1);
     const steering = Math.abs(x) > SPIN.inputDeadzone;
@@ -602,7 +1045,7 @@ export class Skater implements PoseSource {
 
     const p = this.prediction;
     const remaining = p.valid ? p.time - (this.airTime - p.computedAt) : Infinity;
-    if (remaining < SPIN.snapLead) {
+    if (remaining < SPIN.snapLead && !suspendMagnet) {
       // Cible : le multiple de 180° que la rotation atteindrait sur son élan, pas le plus proche de l'angle actuel.
       const coast = SPIN.coastDamping > 0 ? (1 - Math.exp(-SPIN.coastDamping * remaining)) / SPIN.coastDamping : remaining;
       const projected = this.spinAngle + this.spinRate * coast;
@@ -723,7 +1166,9 @@ export class Skater implements PoseSource {
     setVec(this.desired, v.x * dt, v.y * dt, v.z * dt);
     const classifyUp = this.grounded ? this.up : WORLD_UP;
     this.controller.setUp(classifyUp);
-    this.controller.computeColliderMovement(this.collider, this.desired);
+    // Les rails ne bloquent pas le corps : posé sur un tube, il resterait suspendu en l'air.
+    // Les montants arrêtent quand même la planche (rayons au ras du board).
+    this.controller.computeColliderMovement(this.collider, this.desired, undefined, undefined, this.physics.notGrindOnly);
     const moved = this.controller.computedMovement();
 
     const count = this.controller.numComputedCollisions();
@@ -801,7 +1246,7 @@ export class Skater implements PoseSource {
     if (tangentSpeed <= LANDING.yawCheckMinSpeed) yawError = spinError;
 
     // Une simple descente d'arête sans impact notable n'est pas une réception à évaluer.
-    const significant = this.popped || impact >= LANDING.minImpactForRecovery;
+    const significant = this.popped || this.forcedBail || impact >= LANDING.minImpactForRecovery;
     // Board pas encore rattrapé : il reste de la rotation à faire au contact.
     const residual = this.popped ? this.boardResidual() : 0;
     const grabAtContact = this.grabAmount;
@@ -814,6 +1259,11 @@ export class Skater implements PoseSource {
       // Main encore sur le board : on ne peut pas recevoir l'impact.
       if (grabAtContact > GRAB.landBailAmount) quality = 'bail';
       else if (grabAtContact > GRAB.landSloppyAmount && quality === 'clean') quality = 'sloppy';
+    }
+    // Sortie de grind ratée : la réception est une chute quoi qu'il arrive.
+    if (this.forcedBail) {
+      quality = 'bail';
+      this.forcedBail = false;
     }
     this.grabAmount = 0;
     this.grabId = null;
@@ -872,7 +1322,7 @@ export class Skater implements PoseSource {
         dir.divideScalar(len);
         setVec(this.rayOrigin, p.x, p.y, p.z);
         setVec(this.rayDir, dir.x, dir.y, dir.z);
-        const hit = this.physics.castRay(this.rayOrigin, this.rayDir, len, this.collider);
+        const hit = this.physics.castRay(this.rayOrigin, this.rayDir, len, this.collider, true);
         if (hit) {
           pred.valid = true;
           pred.point.set(hit.point.x, hit.point.y, hit.point.z);
@@ -961,7 +1411,7 @@ export class Skater implements PoseSource {
       this.position.z + f.z * o + n.z * GROUND.probeHeight,
     );
     setVec(this.rayDir, -n.x, -n.y, -n.z);
-    const hit = this.physics.castRay(this.rayOrigin, this.rayDir, maxToi, this.collider);
+    const hit = this.physics.castRay(this.rayOrigin, this.rayDir, maxToi, this.collider, true);
     if (!hit) return null;
     const cos = hit.normal.x * n.x + hit.normal.y * n.y + hit.normal.z * n.z;
     return cos >= minCos ? hit : null;
@@ -1010,6 +1460,9 @@ export class Skater implements PoseSource {
     out.grabIndex = this.grabId ? GRAB_ORDER.indexOf(this.grabId) : -1;
     out.grabAmount = this.grabAmount;
     out.spinRate = this.grounded ? 0 : this.spinRate;
+    out.balanceIndex = this.balanceMove ? BALANCE_ORDER.indexOf(this.balanceMove) : -1;
+    out.balance = this.balance;
+    if (this.grinding) out.airborne = false;
   }
 
   /**
