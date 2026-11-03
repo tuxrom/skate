@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BODY, POP } from '@/config/physics';
-import type { SkaterPose, SkaterRig } from './SkaterRig';
+import type { RagdollJoints, SkaterPose, SkaterRig } from './SkaterRig';
 import { GRAB_DEFS, GRAB_ORDER, type GrabId } from './tricks';
 import { BALANCE_ORDER } from './grinds';
 import type { BalanceMoveId } from '@/config/physics';
@@ -109,6 +109,7 @@ const GRAB_POSES: Readonly<Record<GrabId, GrabPose>> = {
 };
 
 const UP = new THREE.Vector3(0, 1, 0);
+const TMP_W = new THREE.Vector3();
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
 const KNEE_HINT = new THREE.Vector3(1, 0, 0);
@@ -157,7 +158,19 @@ export class ProceduralSkaterRig implements SkaterRig {
   private readonly backShoe: THREE.Mesh;
   private readonly frontKnee: THREE.Mesh;
   private readonly backKnee: THREE.Mesh;
-  private readonly arms: { upper: Limb; lower: Limb; side: number }[] = [];
+  private readonly arms: { upper: Limb; lower: Limb; side: number; shoulder: THREE.Vector3; elbow: THREE.Vector3; hand: THREE.Vector3 }[] = [];
+  /** Jambes : maillages et articulations de la pose animée (repère du rider). 0 : avant, 1 : arrière. */
+  private readonly legs: { thigh: Limb; shin: Limb; knee: THREE.Mesh; shoe: THREE.Mesh; hipP: THREE.Vector3; kneeP: THREE.Vector3; footP: THREE.Vector3 }[] = [];
+  /** Ragdoll à appliquer par-dessus l'animation, et son poids. */
+  private ragdoll: RagdollJoints | null = null;
+  private ragdollWeight = 0;
+  private readonly riderInverse = new THREE.Matrix4();
+  private readonly riderQuatInverse = new THREE.Quaternion();
+  private readonly animTorso = new THREE.Matrix4();
+  private readonly blendA = new THREE.Vector3();
+  private readonly blendB = new THREE.Vector3();
+  private readonly blendC = new THREE.Vector3();
+  private readonly blendQ = new THREE.Quaternion();
 
   private wheelAngle = 0;
   /** Distance restante entre la main et la prise au dernier calcul d'IK (m), pour le debug. */
@@ -215,6 +228,12 @@ export class ProceduralSkaterRig implements SkaterRig {
     this.backKnee = this.addMesh(jointGeo, m.pants, this.rider);
     this.frontShoe = this.addMesh(shoeGeo, m.shoe, this.rider);
     this.backShoe = this.addMesh(shoeGeo, m.shoe, this.rider);
+    for (const [thigh, shin, knee, shoe] of [
+      [this.frontThigh, this.frontShin, this.frontKnee, this.frontShoe],
+      [this.backThigh, this.backShin, this.backKnee, this.backShoe],
+    ] as const) {
+      this.legs.push({ thigh, shin, knee, shoe, hipP: new THREE.Vector3(), kneeP: new THREE.Vector3(), footP: new THREE.Vector3() });
+    }
 
     this.rider.add(this.torso);
     const chest = this.addMesh(this.track(new THREE.CapsuleGeometry(0.16, 0.3, 4, 12)), m.shirt, this.torso);
@@ -229,7 +248,14 @@ export class ProceduralSkaterRig implements SkaterRig {
     const brim = this.addMesh(this.track(new THREE.BoxGeometry(0.1, 0.012, 0.16)), m.cap, this.torso);
     brim.position.set(0.11, 0.75, 0);
     for (const side of [-1, 1]) {
-      this.arms.push({ upper: this.addLimb(armGeo, m.shirt, this.torso), lower: this.addLimb(armGeo, m.skin, this.torso), side });
+      this.arms.push({
+        upper: this.addLimb(armGeo, m.shirt, this.torso),
+        lower: this.addLimb(armGeo, m.skin, this.torso),
+        side,
+        shoulder: new THREE.Vector3(),
+        elbow: new THREE.Vector3(),
+        hand: new THREE.Vector3(),
+      });
     }
   }
 
@@ -371,6 +397,73 @@ export class ProceduralSkaterRig implements SkaterRig {
       }
       arm.upper.set(this.shoulder, this.elbow);
       arm.lower.set(this.elbow, this.hand);
+      arm.shoulder.copy(this.shoulder);
+      arm.elbow.copy(this.elbow);
+      arm.hand.copy(this.hand);
+    }
+    if (this.ragdoll && this.ragdollWeight > 0) this.blendRagdoll(this.ragdoll, this.ragdollWeight);
+  }
+
+  applyRagdoll(joints: RagdollJoints | null, weight: number): void {
+    this.ragdoll = joints;
+    this.ragdollWeight = joints ? THREE.MathUtils.clamp(weight, 0, 1) : 0;
+  }
+
+  captureJoints(out: RagdollJoints): void {
+    this.root.updateMatrixWorld(true);
+    this.torso.getWorldPosition(out.pelvis);
+    this.torso.getWorldQuaternion(out.torso);
+    this.torso.localToWorld(out.head.set(0.01, 0.72, 0));
+    for (let i = 0; i < 2; i++) {
+      const leg = this.legs[i]!;
+      this.rider.localToWorld(out.hip[i]!.copy(leg.hipP));
+      this.rider.localToWorld(out.knee[i]!.copy(leg.kneeP));
+      this.rider.localToWorld(out.ankle[i]!.copy(leg.footP));
+      const arm = this.arms[i]!;
+      this.torso.localToWorld(out.shoulder[i]!.copy(arm.shoulder));
+      this.torso.localToWorld(out.elbow[i]!.copy(arm.elbow));
+      this.torso.localToWorld(out.hand[i]!.copy(arm.hand));
+    }
+  }
+
+  /**
+   * Mélange la pose animée et les articulations du ragdoll (monde), dans le repère du rider :
+   * buste (origine et orientation), jambes, puis bras ramenés dans le repère du buste mélangé.
+   */
+  private blendRagdoll(j: RagdollJoints, w: number): void {
+    this.root.updateMatrixWorld(true);
+    this.riderInverse.copy(this.rider.matrixWorld).invert();
+    this.rider.getWorldQuaternion(this.riderQuatInverse).invert();
+    this.torso.updateMatrix();
+    this.animTorso.copy(this.torso.matrix);
+
+    this.blendA.copy(j.pelvis).applyMatrix4(this.riderInverse);
+    this.torso.position.lerp(this.blendA, w);
+    this.blendQ.multiplyQuaternions(this.riderQuatInverse, j.torso);
+    this.torso.quaternion.slerp(this.blendQ, w);
+    this.torso.updateMatrix();
+    this.torsoInverse.copy(this.torso.matrix).invert();
+
+    for (let i = 0; i < 2; i++) {
+      const leg = this.legs[i]!;
+      const hip = this.blendA.copy(j.hip[i]!).applyMatrix4(this.riderInverse).lerp(leg.hipP, 1 - w);
+      const knee = this.blendB.copy(j.knee[i]!).applyMatrix4(this.riderInverse).lerp(leg.kneeP, 1 - w);
+      const ankle = this.blendC.copy(j.ankle[i]!).applyMatrix4(this.riderInverse).lerp(leg.footP, 1 - w);
+      leg.thigh.set(hip, knee);
+      leg.shin.set(knee, ankle);
+      leg.knee.position.copy(knee);
+      leg.shoe.position.set(ankle.x + 0.06 * (1 - w), ankle.y - ANKLE_HEIGHT * (1 - w) + 0.035 * (1 - w), ankle.z);
+
+      // Bras : pose animée exprimée dans le repère du rider, mélangée, puis ramenée dans le buste.
+      const arm = this.arms[i]!;
+      const s = this.blendA.copy(arm.shoulder).applyMatrix4(this.animTorso).lerp(TMP_W.copy(j.shoulder[i]!).applyMatrix4(this.riderInverse), w);
+      const e = this.blendB.copy(arm.elbow).applyMatrix4(this.animTorso).lerp(TMP_W.copy(j.elbow[i]!).applyMatrix4(this.riderInverse), w);
+      const h = this.blendC.copy(arm.hand).applyMatrix4(this.animTorso).lerp(TMP_W.copy(j.hand[i]!).applyMatrix4(this.riderInverse), w);
+      s.applyMatrix4(this.torsoInverse);
+      e.applyMatrix4(this.torsoInverse);
+      h.applyMatrix4(this.torsoInverse);
+      arm.upper.set(s, e);
+      arm.lower.set(e, h);
     }
   }
 
@@ -489,6 +582,10 @@ export class ProceduralSkaterRig implements SkaterRig {
     shin.set(this.knee, foot);
     kneeMesh.position.copy(this.knee);
     shoe.position.set(foot.x + 0.06, foot.y - ANKLE_HEIGHT + 0.035, foot.z);
+    const leg = this.legs[side < 0 ? 0 : 1]!;
+    leg.hipP.copy(hip);
+    leg.kneeP.copy(this.knee);
+    leg.footP.copy(foot);
   }
 
   private addLimb(geo: THREE.BufferGeometry, mat: THREE.Material, parent: THREE.Object3D): Limb {

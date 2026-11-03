@@ -23,6 +23,8 @@ export interface CameraTarget {
   landingPoint: THREE.Vector3;
   /** Temps avant la réception prévue (s). */
   landingTime: number;
+  /** Part de l'avance du point visé (0 à 1) : 0 pendant une chute, on regarde le corps. */
+  lookAheadScale: number;
 }
 
 /**
@@ -44,6 +46,8 @@ export class CameraRig {
   /** Point visé lissé, décalé vers la réception prévue. */
   private lookBlend = 0;
   private dip = 0;
+  private lookAheadScale = 1;
+  private targetLookAhead = 1;
 
   constructor(private readonly clearance: ClearanceQuery | null = null) {
     this.camera = new THREE.PerspectiveCamera(CAMERA.fovMin, 1, CAMERA.near, CAMERA.far);
@@ -67,6 +71,7 @@ export class CameraRig {
   }
 
   update(target: CameraTarget, dt: number): void {
+    this.targetLookAhead = target.lookAheadScale;
     this.yaw = dampAngle(this.yaw, this.targetYaw(target.forward, this.yaw), CAMERA.yawStiffness, dt);
 
     // Ancre : suivi horizontal et vertical avec des raideurs différentes.
@@ -120,7 +125,8 @@ export class CameraRig {
     this.desired.copy(this.lookAt).addScaledVector(this.dir, this.distance);
     this.camera.position.copy(this.desired);
     // Le point visé avance dans le sens du cap, et glisse vers la réception prévue en fin de saut.
-    this.offset.set(0, 0, -CAMERA.lookAhead).applyAxisAngle(UP, this.yaw);
+    this.lookAheadScale += (this.targetLookAhead - this.lookAheadScale) * (1 - Math.exp(-CAMERA.heightStiffness * dt));
+    this.offset.set(0, 0, -CAMERA.lookAhead * this.lookAheadScale).applyAxisAngle(UP, this.yaw);
     this.lookAt.add(this.offset);
     if (this.lookBlend > 1e-3) {
       this.offset.copy(this.look).addScaledVector(UP, CAMERA.lookHeight * 0.5);

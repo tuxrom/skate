@@ -70,3 +70,21 @@ export function playLand(ctx: AudioContext, out: AudioNode, strength: number, sl
   tone(ctx, out, t + 0.004, 'triangle', 620, 300, g * 0.4, 0.05);
   if (sloppy) noiseHit(ctx, out, t + 0.03, 900, 0.6, g * 0.5, 0.18);
 }
+
+/** Chute : choc sourd du corps sur le sol (grave, étouffé), plus fort avec `strength`. */
+export function playBodyImpact(ctx: AudioContext, out: AudioNode, strength: number): void {
+  const t = ctx.currentTime;
+  const g = 0.2 + 0.6 * strength;
+  tone(ctx, out, t, 'sine', 95 + Math.random() * 25, 40, g, 0.16 + 0.1 * strength);
+  noiseHit(ctx, out, t, 420 + Math.random() * 180, 0.7, g * 0.7, 0.09);
+  if (strength > 0.5) noiseHit(ctx, out, t + 0.01, 1600, 1.0, g * 0.3, 0.05);
+}
+
+/** Planche lâchée qui rebondit : claquement de bois et roues, plus aigu que le corps. */
+export function playBoardClatter(ctx: AudioContext, out: AudioNode, strength: number): void {
+  const t = ctx.currentTime;
+  const g = 0.15 + 0.5 * strength;
+  tone(ctx, out, t, 'triangle', 700 + Math.random() * 300, 380, g * 0.6, 0.06);
+  noiseHit(ctx, out, t, 2200 + Math.random() * 600, 1.4, g, 0.04);
+  tone(ctx, out, t + 0.02, 'square', 210, 160, g * 0.15, 0.05);
+}

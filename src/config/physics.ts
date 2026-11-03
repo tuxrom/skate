@@ -390,18 +390,78 @@ export const BALANCE = {
 
 /** Seuils de chute. */
 export const BAIL = {
-  /** Angle max entre la planche et la normale du sol à la réception (rad). */
+  // Déclencheurs.
+  /** Angle max entre la planche et la normale du sol à la réception (rad). Au-delà : chute. */
   maxLandingTilt: 0.6,
-  /** Écart max de cap entre la planche et la vitesse à la réception (rad). */
+  /** Écart max de cap entre la planche et la vitesse à la réception (rad). Au-delà : chute. */
   maxLandingYawError: 0.7,
   /** Vitesse verticale d'impact au-delà de laquelle on chute (m/s, valeur positive). */
   maxImpactSpeed: 11.0,
-  /** Vitesse horizontale contre un mur qui provoque la chute (m/s). */
+  /** Vitesse d'impact contre un mur (composante normale) qui provoque la chute (m/s). */
   wallImpactSpeed: 5.0,
-  /** Durée de la chute avant de pouvoir reprendre la main (s). */
-  ragdollDuration: 1.8,
-  /** Délai avant la réapparition automatique (s). */
-  respawnDelay: 2.5,
+  /** Vitesse d'impact de la planche contre un obstacle bas (curb, ledge) qui fait trébucher (m/s). */
+  tripImpactSpeed: 3.5,
+  /** Part de la vitesse entrant dans le mur gardée par le corps à l'impact (le reste est absorbé). */
+  wallImpactKeep: 0.3,
+
+  // Ragdoll.
+  /** Part de la vitesse du skateur transmise au corps et à la planche. */
+  inheritVelocity: 0.9,
+  /** Plafond de la vitesse héritée (m/s), contre les envolées. */
+  maxInheritedSpeed: 14,
+  /** Impulsion verticale ajoutée en trébuchant sur un obstacle bas (m/s) : le corps bascule par-dessus. */
+  tripLift: 1.8,
+  /** Rotation donnée au torse en trébuchant (rad/s), le corps plonge vers l'avant. */
+  tripTumble: 5,
+  /** Rotation aléatoire de départ des membres (rad/s), pour une chute moins mécanique. */
+  limbTumble: 2.5,
+  /** Rotation donnée à la planche lâchée (rad/s). */
+  boardTumble: 7,
+  /** Amortissement linéaire des membres (1/s). */
+  linearDamping: 0.15,
+  /** Amortissement angulaire des membres (1/s). Assez fort pour éviter les tourbillons. */
+  angularDamping: 1.2,
+  /** Densité des membres (kg/m³) : environ 75 kg pour le corps entier. */
+  bodyDensity: 1000,
+  /** Friction des membres sur le décor. */
+  bodyFriction: 0.9,
+  /** Restitution des membres : on rebondit peu. */
+  bodyRestitution: 0.05,
+  /** Vitesse linéaire max d'un membre (m/s), garde-fou contre une explosion numérique. */
+  maxPartSpeed: 22,
+  /** Vitesse angulaire max d'un membre (rad/s). */
+  maxPartAngularSpeed: 30,
+
+  // Relève.
+  /** Durée minimale de la chute avant de pouvoir se relever (s). */
+  minRagdollTime: 0.6,
+  /** Le corps est stabilisé quand le bassin et le torse vont moins vite que cette vitesse (m/s)... */
+  settleSpeed: 0.35,
+  /** ...pendant cette durée (s). */
+  settleTime: 0.35,
+  /** Durée max de la chute avant de se relever quoi qu'il arrive (s). */
+  ragdollDuration: 2.2,
+  /** Fondu entre la pose au sol et la pose debout (s). */
+  getUpTime: 0.45,
+  /** Fondu raccourci quand on se relève avec R (s). */
+  quickGetUpTime: 0.2,
+  /** Temps de récupération après la relève, sans pop ni poussée (s). */
+  recoveryTime: 0.25,
+  /** Rayon max de recherche d'un point de relève dégagé autour du bassin (m). */
+  respawnSearchRadius: 2.5,
+  /** Pente max d'un point de relève (rad). */
+  respawnMaxSlope: 0.45,
+  /**
+   * Hauteur max d'un point de relève au-dessus du bassin au sol (m) : on ne se relève jamais
+   * sur un module ou un mur plus haut que l'endroit où l'on est tombé.
+   */
+  respawnMaxRise: 0.3,
+
+  // Sons.
+  /** Variation de vitesse d'un membre en un pas au-delà de laquelle un impact s'entend (m/s). */
+  impactSoundSpeed: 2.2,
+  /** Délai minimal entre deux sons d'impact d'un même membre (s). */
+  impactSoundCooldown: 0.12,
 } as const;
 
 /** Fenêtres et délais d'input. */

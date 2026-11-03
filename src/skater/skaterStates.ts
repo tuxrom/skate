@@ -264,7 +264,7 @@ const manual: SkaterState = {
     if (!sk.input.held.has('manual')) return rollingState(sk);
     if (sk.updateManual(dt)) {
       sk.manualBail();
-      return 'landing';
+      return 'bail';
     }
     if (sk.speed < SKATING.stopSpeed) {
       sk.endManual('slow');
@@ -287,6 +287,14 @@ const landing: SkaterState = {
   },
 };
 
+/** Chute : la simulation est suspendue, le ragdoll et BailController ont la main jusqu'à la relève. */
+const bail: SkaterState = {
+  id: 'bail',
+  update(sk) {
+    return sk.bailing ? null : 'idle';
+  },
+};
+
 export function registerSkaterStates(fsm: StateMachine<SkaterStateId, Skater>): void {
-  fsm.add(idle).add(riding).add(pushing).add(braking).add(popCharge).add(pop).add(air).add(landing).add(grind).add(manual);
+  fsm.add(idle).add(riding).add(pushing).add(braking).add(popCharge).add(pop).add(air).add(landing).add(grind).add(manual).add(bail);
 }

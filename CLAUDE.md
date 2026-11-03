@@ -34,7 +34,7 @@ En mode debug, `window.__skate` expose le jeu : `debugState()` (état du skateur
 | E tenu (+ flèche), ou clic droit tenu (+ glissé) | LT / RT tenue (+ stick droit) | Grab, tant que c'est tenu : haut = nosegrab, bas = tailgrab, droite = indy, gauche = melon, sans direction = indy |
 | Ctrl tenu (ou C), équilibre avec ↑ / ↓ | LB / RB tenue, équilibre au stick gauche | Manual au sol ; ↑ tenu à l'entrée = nose manual |
 | Shift | A / Croix | Pousser ; maintenir enchaîne des poussées plus fortes (accélérer) |
-| R | Select | Retour au départ |
+| R | Select | Pendant une chute : se relever tout de suite. Sinon : retour au départ |
 | Échap | Start | Pause |
 | F3 ou ² | | Panneau de debug |
 
@@ -62,6 +62,12 @@ Tout geste commence stick en bas (charge, le skateur s'accroupit ; la durée rè
 - **Sortir** : Espace ou un geste de flick (flip de sortie), ou au bout du rail. En dessous de `GRIND.minSpeed`, le board tombe du rail.
 - **Enchaîner** : Ctrl tenu à la réception d'une sortie de grind donne un manual ; un ollie depuis un manual peut accrocher un rail.
 - **Attention** : Ctrl+W ferme l'onglet et aucune page ne peut l'empêcher. C fait la même chose que Ctrl.
+
+### Chutes
+
+- **Déclencheurs** : réception hors limites (angle planche / surface `BAIL.maxLandingTilt`, écart de cap `maxLandingYawError`, impact `maxImpactSpeed`, flip pas rattrapé, grab tenu), jauge d'équilibre sortie en grind ou en manual, choc contre un mur (`wallImpactSpeed`) ou planche qui bute sur un obstacle bas (`tripImpactSpeed`, le corps passe par-dessus).
+- **Chute** : le corps part en ragdoll avec la vitesse du skateur, la planche continue seule. La caméra suit le bassin.
+- **Relève** : quand le corps est posé (`settleSpeed` pendant `settleTime`), au plus tard après `ragdollDuration`, ou tout de suite avec R. Point dégagé cherché près du bassin, fondu vers la pose debout, planche ramenée aux pieds.
 
 ### En l'air
 
@@ -94,14 +100,16 @@ src/
     InterpolatedBody.ts interpolation d'une PoseSource (corps Rapier, skateur) vers un Object3D
   skater/
     Skater.ts           simulation : intégration, suivi du sol, obstacles, ollie, prédiction, évaluation de réception
-    skaterStates.ts     états idle, pushing, riding, braking, popCharge, pop, air, landing
+    skaterStates.ts     états idle, pushing, riding, braking, popCharge, pop, air, landing, grind, manual, bail
     StateMachine.ts     machine à états générique
     states.ts           identifiants de tous les états prévus
     tricks.ts           définitions des tricks : tours de flip et de shove, noms, grabs, nom du saut
     grinds.ts           définitions des grinds et manuals : géométrie de contact, choix du type
     SkaterRig.ts        interface du visuel animable et pose d'animation
     ProceduralSkaterRig.ts skateur en primitives (planche, 4 roues, rider à IK)
-    SkaterVisual.ts     relie simulation et rig, interpole la pose d'animation
+    SkaterVisual.ts     relie simulation et rig, interpole la pose d'animation, fondu de la planche à la relève
+    Ragdoll.ts          ragdoll Rapier : 11 corps reliés par des rotules, garde-fous, articulations interpolées
+    BailController.ts   chute : ragdoll, planche lâchée, sons d'impact, stabilisation, point de relève, fondu
   world/
     Level.ts            skatepark de test : sol, murs, modules, rails, ledges, éclairage
     parkModules.ts      constructeurs de modules (visuel + colliders depuis un même profil), ledges et rails grindables
@@ -116,7 +124,7 @@ src/
     BalanceMeter.ts     jauge d'équilibre des grinds et manuals
   audio/
     AudioEngine.ts      contexte Web Audio déverrouillé au premier geste, bus master
-    sfx.ts              sons synthétisés : pop du tail, claque de réception
+    sfx.ts              sons synthétisés : pop du tail, claque de réception, chocs du corps et de la planche
 ```
 
 ## Architecture
@@ -135,21 +143,25 @@ src/
   - une capsule surélevée (`BODY.capsuleClearance`) et le `KinematicCharacterController` de Rapier gèrent les obstacles hauts ;
   - un choc rasant (`GROUND.wallDeflectAngle`) redresse la planche le long du mur.
 - **Ollie** : `popCharge` accumule la charge (linéaire jusqu'à `POP.chargeTime`), `pop` attend `POP.popDelay` puis `performPop` ajoute `√(2·g·h)` le long de la normale du sol, h interpolé entre `POP.minHeight` et `POP.maxHeight`. La vitesse tangentielle est conservée. Coyote time (`INPUT.coyoteMs`) si la planche quitte une arête pendant la charge, buffer (`INPUT.popBufferMs`) pour un tap juste avant la réception.
-- **En l'air** : seule la gravité agit, la vitesse horizontale est conservée exactement. Le corps tourne au stick gauche avec inertie (`POP.airSpinRate`, `POP.airSpinResponse`). La trajectoire balistique est prédite par segments de rayons (`Skater.prediction`) ; la planche s'aligne sur la normale de réception prévue (`POP.airAlignRate`) et la caméra s'en sert.
+- **En l'air** : seule la gravité agit, la vitesse horizontale est conservée exactement. Le corps tourne au stick gauche avec inertie (`SPIN`). La trajectoire balistique est prédite par segments de rayons (`Skater.prediction`) ; la planche s'aligne sur la normale de réception prévue (`POP.airAlignRate`) et la caméra s'en sert.
 - **Lignes de grind** : géométrie explicite dans `GrindNetwork` (segments orientés de a vers b, nature `round`, `flat`, `ledge` ou `coping`, matériau, collider porteur), chaînés quand ils se touchent. Les colliders de rails et de montants sont marqués `markGrindOnly` : les sondes de sol et le corps du skateur les ignorent (on ne roule pas sur un tube et le corps ne s'y pose pas), seuls les rayons au ras de la planche butent sur les montants.
 - **Détection de grind** (`Skater.tryStartGrind`) : en l'air après le déplacement, la capsule de l'axe du board (queue-nez) cherche la ligne la plus proche, puis `acceptGrind` filtre : délai de réaccrochage, recouvrement (board dans l'axe) ou centre au-dessus (slide), fenêtre de hauteur, distance horizontale, arrivée par le dessus au pas précédent, vitesse le long de la ligne, rayon de visibilité libre jusqu'à la ligne. Au sol, seuls les copings sur une transition raide. `grindReject` donne la dernière raison de refus (debug).
 - **Grind** (`Skater.grindStep`, état `grind`) : la vitesse le long du segment suit la pente et la friction du matériau (`MATERIALS.grindFriction` × `GRIND.typeFriction`). L'écart initial au rail se résorbe en `GRIND.snapResponse` (accrochage progressif). Sorties : ollie ou flip (`updateGrindPop`), bout du rail, vitesse trop faible, obstacle, chute. Un slide quitté remet le board dans l'axe.
-- **Jauge d'équilibre** : commune aux grinds et manuals, dynamique instable (`BALANCE`) : divergence qui croît avec la durée, perturbation pseudo-aléatoire, correction au stick, difficulté par type. Une sortie de zone sûre en grind pousse le skateur du côté du déséquilibre et force une réception en chute ; en manual, elle déclenche une réception en chute sur place. Les vraies chutes arrivent à l'étape 6.
+- **Jauge d'équilibre** : commune aux grinds et manuals, dynamique instable (`BALANCE`) : divergence qui croît avec la durée, perturbation pseudo-aléatoire, correction au stick, difficulté par type. Une sortie de zone sûre déclenche une chute ; en grind, le skateur est poussé du côté du déséquilibre.
 - **Manual** (état `manual`) : touche tenue au sol au-dessus de `MANUAL.minSpeed`, résistance au roulement accrue, même jauge. On y entre aussi à la réception si la touche est tenue (grind → manual) ; on en sort par un ollie ou un flip, qui peut mener à un grind. Les événements `balanceStart` / `balanceEnd` (type, durée, distance, raison) alimenteront les combos de l'étape 7.
 - **Aimantation des rotations** : suspendue tant qu'une ligne de grind passe sous le board (`GRIND.spinMagnetSuspendRadius`), pour pouvoir arriver en travers sur un slide.
+- **Chutes** (`Skater.triggerBail`, état `bail`) : la simulation du skateur se fige, son collider est désactivé et l'événement `bail` (cause, vitesse, position, cap) part vers `Game`. Les chocs violents détectés pendant un pas (`wallResponse`) sont différés à la fin du pas avec la vitesse d'avant l'impact ; un rayon à hauteur du torse distingue un mur d'un obstacle bas.
+- **Ragdoll** (`Ragdoll`) : bassin, torse, tête, bras et jambes en deux segments, reliés par des rotules. Créé sur la pose affichée (`SkaterRig.captureJoints`), donc les articulations sont satisfaites dès le premier pas. Les membres ne collisionnent qu'avec le décor (`RAGDOLL_GROUPS`), CCD active, vitesses plafonnées (`BAIL.maxPartSpeed`), garde-fou au-dessus du sol. Ces quatre mesures évitent les explosions et les membres sous le sol.
+- **Groupes de collision** (`PhysicsWorld`) : décor, ragdoll, planche lâchée. Les requêtes (`castRay`, `sphereClearance`, `isStandingSpaceFree`) ne voient que le décor.
+- **BailController** : planche lâchée en corps dynamique (pose du rig via `Skater.poseOverride`), sons d'impact sur les variations brutales de vitesse, stabilisation jugée sur le bassin et le torse. Relève : recherche en anneaux d'un point au sol peu pentu, pas plus haut que le bassin (`respawnMaxRise`), où la capsule du corps tient sans toucher le décor ; repli sur `Skater.lastSafePosition`. Le rig fond de la pose au sol vers la pose animée (`applyRagdoll` avec un poids qui décroît), la planche glisse jusqu'aux pieds (`SkaterVisual.blendFromCurrent`).
 - **Grabs** : couche du vol gérée par `Skater.updateGrab` (pas un état de la machine). Direction lue sur un stick dédié, `InputSnapshot.grab` (flèches avec E, glissé du clic droit, stick droit avec une gâchette), séparé du stick de flick pour qu'un tailgrab ne déclenche jamais une charge. Un grab compte après `GRAB.minHold` main sur le board ; les grabs comptés et la prise au contact entrent dans `LandingInfo`.
 - **Rotations du corps** : `Skater.updateSpin` accumule `spinAngle` ; la rotation fait tourner le cap du board et du corps ensemble. L'aimantation projette l'angle sur l'élan restant, verrouille le multiple visé et vise le contact anticipé (`SPIN.snapContactLead`). À la réception, `spinError` (écart au multiple de 180° le plus proche) remplace l'écart à la vitesse quand on est à l'arrêt.
 - **Nom du saut** : `comboName` assemble rotation, trick et grabs (« 180 Kickflip Indy ») dans `LandingInfo.label`.
 - **Fakie** : la poussée agit dans le sens de la marche et le virage suit le sens de la marche. La caméra suit aussi le sens de la marche (vitesse horizontale en l'air), donc elle ne tourne pas avec le skateur pendant une rotation.
 - **Tricks** : `performPop` démarre le trick du dernier `FlickEvent` (`Skater.trick`). La rotation du board dure `TRICKS.rotationAirFraction` du temps de vol prévu, bornée par `minRotationTime` et `maxRotationTime` : plus le saut est haut, plus la rotation est lente. La progression est adoucie (`trickEase`), les pieds quittent le board puis le rattrapent sur `TRICKS.catchFraction`. À la réception, la rotation restante (`boardResidual`) dégrade la qualité au-delà de `TRICKS.landFlipTolerance` (sale) et du double (hors limites), et le board raté reste de travers un instant avant de se recaler.
-- **Réception** : `tryLand` mesure l'angle planche / surface (`tilt`), l'écart entre l'axe de la planche et la vitesse (`yawError`, fakie accepté) et la vitesse d'impact. Qualité `clean`, `sloppy` (seuils `LANDING`) ou `bail` (seuils `BAIL`, en attendant les chutes de l'étape 6), avec perte de vitesse et temps de récupération (état `landing`). Une surface plus inclinée que `GROUND.maxLandingSurfaceAngle` n'accepte jamais de réception. Les effets (son, poussière, affaissement caméra) passent par `Skater.events`.
+- **Réception** : `tryLand` mesure l'angle planche / surface (`tilt`), l'écart entre l'axe de la planche et la vitesse (`yawError`, fakie accepté) et la vitesse d'impact. Qualité `clean`, `sloppy` (seuils `LANDING`, perte de vitesse et récupération dans l'état `landing`) ou `bail` (seuils `BAIL`, chute). Une surface plus inclinée que `GROUND.maxLandingSurfaceAngle` n'accepte jamais de réception. Les effets (son, poussière, affaissement caméra) passent par `Skater.events`.
 - **Modules de skatepark** : un profil 2D extrudé donne le visuel, sa décomposition convexe donne les colliders (`ColliderDesc.convexHull`). Les colonnes adjacentes partagent leurs arêtes exactement, ce qui évite les accrocs aux raccords.
-- **Caméra** : les requêtes de collision passent par un callback fourni par `Game`, `CameraRig` ne dépend pas de Rapier. Rapprochement immédiat quand le décor bouche la vue, recul amorti. En l'air, le suivi vertical se relâche et glisse vers l'altitude de réception prévue (`CAMERA.landingLead`, `landingAnticipation`) ; à l'impact, affaissement proportionnel à la vitesse.
+- **Caméra** : les requêtes de collision passent par un callback fourni par `Game`, `CameraRig` ne dépend pas de Rapier. Rapprochement immédiat quand le décor bouche la vue, recul amorti ; un départ déjà au contact d'un mur ne bloque pas le balayage. Pendant une chute, elle suit le bassin du ragdoll sans avance du point visé, puis revient derrière le skateur. En l'air, le suivi vertical se relâche et glisse vers l'altitude de réception prévue (`CAMERA.landingLead`, `landingAnticipation`) ; à l'impact, affaissement proportionnel à la vitesse.
 - **Animation** : `SkaterPose` porte des temps (`popTime`, `landTime`, `airTime`) plutôt que des angles ; chaque rig en tire ses propres courbes. Le rig procédural fait pivoter la planche autour des roues arrière (nose qui se lève puis nivelage), applique les rotations de trick autour du centre du deck (shove sur l'axe vertical, puis flip sur l'axe long) et place les pieds sur le deck par IK, décollés pendant la rotation (`feetLift`). En grind et en manual (`BALANCE_POSES`), le board se cabre sur la paire de roues qui porte (5-0, manual) ou pique du nose (nosegrind, nose manual, avec compensation de hauteur), et le buste suit la jauge. Pour un grab, le board remonte vers la main, le buste se penche et tourne vers la zone de prise, et le bras qui attrape est placé par IK (`GRAB_POSES`).
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
@@ -174,7 +186,7 @@ src/
 - [x] 3. Flicks et flips : stick droit à la souris et aux flèches, reconnaissance de gestes (ollie, kickflip, heelflip, pop shove-it, 360 flip, varial flip, hardflip), rotation du board liée à la hauteur, rattrapage par les pieds, réception évaluée sur la rotation restante, panneau de debug du geste
 - [x] 4. Grabs : indy, melon, nosegrab, tailgrab à E, au clic droit ou à la gâchette ; rotations 180, 360, 540 avec aimantation ; enchaînement flip, grab et rotation dans un même saut ; caméra et poussée en fakie
 - [x] 5. Grinds et manuals : lignes de grind explicites, 50-50, 5-0, nosegrind, boardslide, lipslide, manual et nose manual, jauge d'équilibre, sorties par ollie ou flip, transitions grind ↔ manual ; parc : six rails, ledge continu, boîte de manual
-- [ ] 6. Bails
+- [x] 6. Bails : déclencheurs (réception, équilibre, mur, obstacle bas), ragdoll Rapier à rotules lancé depuis la pose affichée, planche indépendante, relève sur un point dégagé avec fondu, R pour se relever, caméra sur le corps, sons d'impact
 - [ ] 7. Score et combos
 - [ ] 8. HUD, menus, sauvegarde
 - [ ] 9. Contrôles tactiles

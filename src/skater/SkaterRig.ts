@@ -1,4 +1,4 @@
-import type * as THREE from 'three';
+import * as THREE from 'three';
 
 /** Pose d'animation de haut niveau, indépendante de la façon dont le skateur est dessiné. */
 export interface SkaterPose {
@@ -96,6 +96,54 @@ export function copyPose(out: SkaterPose, src: SkaterPose): void {
 }
 
 /**
+ * Articulations du corps en coordonnées monde, échangées entre le rig et le ragdoll.
+ * Index 0 : côté avant (jambe et bras côté nose), 1 : côté arrière.
+ * Le repère du buste a son origine au bassin.
+ */
+export interface RagdollJoints {
+  readonly pelvis: THREE.Vector3;
+  readonly torso: THREE.Quaternion;
+  readonly head: THREE.Vector3;
+  readonly hip: [THREE.Vector3, THREE.Vector3];
+  readonly knee: [THREE.Vector3, THREE.Vector3];
+  readonly ankle: [THREE.Vector3, THREE.Vector3];
+  readonly shoulder: [THREE.Vector3, THREE.Vector3];
+  readonly elbow: [THREE.Vector3, THREE.Vector3];
+  readonly hand: [THREE.Vector3, THREE.Vector3];
+}
+
+export function createJoints(): RagdollJoints {
+  const pair = (): [THREE.Vector3, THREE.Vector3] => [new THREE.Vector3(), new THREE.Vector3()];
+  return {
+    pelvis: new THREE.Vector3(),
+    torso: new THREE.Quaternion(),
+    head: new THREE.Vector3(),
+    hip: pair(),
+    knee: pair(),
+    ankle: pair(),
+    shoulder: pair(),
+    elbow: pair(),
+    hand: pair(),
+  };
+}
+
+const JOINT_PAIRS = ['hip', 'knee', 'ankle', 'shoulder', 'elbow', 'hand'] as const;
+
+export function copyJoints(out: RagdollJoints, src: RagdollJoints): void {
+  out.pelvis.copy(src.pelvis);
+  out.torso.copy(src.torso);
+  out.head.copy(src.head);
+  for (const k of JOINT_PAIRS) for (let i = 0; i < 2; i++) out[k][i]!.copy(src[k][i]!);
+}
+
+export function lerpJoints(out: RagdollJoints, a: RagdollJoints, b: RagdollJoints, t: number): void {
+  out.pelvis.lerpVectors(a.pelvis, b.pelvis, t);
+  out.torso.slerpQuaternions(a.torso, b.torso, t);
+  out.head.lerpVectors(a.head, b.head, t);
+  for (const k of JOINT_PAIRS) for (let i = 0; i < 2; i++) out[k][i]!.lerpVectors(a[k][i]!, b[k][i]!, t);
+}
+
+/**
  * Représentation visuelle animable du skateur.
  * Repère local : X à droite, Y en haut, -Z vers l'avant ; origine au contact du sol, entre les trucks.
  * Une version glTF implémentera la même interface avec un AnimationMixer.
@@ -104,5 +152,12 @@ export interface SkaterRig {
   readonly root: THREE.Object3D;
   /** Appelé à chaque frame rendue avec la pose interpolée. */
   update(pose: SkaterPose, dt: number): void;
+  /** Écrit les articulations de la pose affichée (monde), pour lancer un ragdoll sans saut visuel. */
+  captureJoints(out: RagdollJoints): void;
+  /**
+   * Pose le corps sur des articulations monde, mélangées à la pose animée avec `weight`
+   * (1 : ragdoll seul, 0 : animation seule). null rend la main à l'animation.
+   */
+  applyRagdoll(joints: RagdollJoints | null, weight: number): void;
   dispose(): void;
 }

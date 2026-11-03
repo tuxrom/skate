@@ -25,6 +25,11 @@ const HALF_WHEELBASE = BODY.wheelbase / 2;
 
 const MAX_LANDING_COS_UP = Math.cos(GROUND.maxLandingAngle);
 const COS_LANDING_SURFACE = Math.cos(GROUND.maxLandingSurfaceAngle);
+/** Hauteur et portée du rayon qui distingue un mur d'un obstacle bas (m). */
+const BODY_CHECK_HEIGHT = 0.8;
+const BODY_CHECK_REACH = 0.6;
+/** Sol assez plat pour servir de point de relève de repli (cos de la pente). */
+const SAFE_GROUND_COS = 0.97;
 /** Portée de recherche d'une ligne sous le board en l'air (m) : couvre toute la hauteur d'un saut. */
 const RAIL_BELOW_SEARCH = 2.5;
 
@@ -63,6 +68,17 @@ export interface LandingInfo {
 }
 
 /** Écouteurs des événements ponctuels du skateur (son, particules, caméra). */
+/** Cause d'une chute. */
+export type BailCause = 'landing' | 'grind' | 'manual' | 'wall' | 'trip';
+
+/** Instantané au moment de la chute, pour lancer le ragdoll. */
+export interface BailInfo {
+  cause: BailCause;
+  readonly velocity: THREE.Vector3;
+  readonly position: THREE.Vector3;
+  readonly forward: THREE.Vector3;
+}
+
 /** Raison de fin d'un grind ou d'un manual. */
 export type BalanceEndReason = 'end' | 'pop' | 'slow' | 'bail' | 'blocked' | 'release' | 'air';
 
@@ -73,6 +89,8 @@ export interface SkaterEvents {
   /** Fin d'un grind ou d'un manual : durée (s) et distance parcourue (m), pour les combos. */
   balanceEnd?(move: BalanceMoveId, time: number, distance: number, reason: BalanceEndReason): void;
   land?(info: LandingInfo): void;
+  /** Chute : le skateur passe en ragdoll. */
+  bail?(info: BailInfo): void;
 }
 
 /** Point de réception prévu par la trajectoire balistique. */
@@ -192,6 +210,20 @@ export class Skater implements PoseSource {
   /** Multiple de 180° visé par l'aimantation, verrouillé une fois choisi (NaN tant qu'aucun). */
   private spinSnapTarget = Number.NaN;
 
+  // Chutes.
+  /** Vrai pendant une chute : la simulation du skateur est suspendue, le ragdoll a la main. */
+  bailing = false;
+  /** Chute demandée pendant le pas (choc contre un mur), traitée à la fin du pas. */
+  private pendingBail: BailCause | null = null;
+  /** Vitesse juste avant le choc qui a déclenché la chute, et normale du mur. */
+  private readonly pendingBailVelocity = new THREE.Vector3();
+  private readonly pendingBailNormal = new THREE.Vector3();
+  readonly bailInfo: BailInfo = { cause: 'landing', velocity: new THREE.Vector3(), position: new THREE.Vector3(), forward: new THREE.Vector3() };
+  /** Dernière position sûre au sol (plat, hors grind), repli pour la relève. */
+  readonly lastSafePosition = new THREE.Vector3();
+  /** Source de pose de remplacement pendant une chute (la planche lâchée). */
+  poseOverride: PoseSource | null = null;
+
   // Grinds et manuals.
   /** Lignes de grind du niveau, fournies par Game. */
   grinds: GrindNetwork | null = null;
@@ -217,8 +249,6 @@ export class Skater implements PoseSource {
   private readonly grindOffset = new THREE.Vector3();
   private lastGrindSegment: GrindSegment | null = null;
   private lastGrindExit = -Infinity;
-  /** La prochaine réception est une chute (sortie de grind ratée). */
-  private forcedBail = false;
   private grindOnGround = false;
   private readonly prevPosition = new THREE.Vector3();
   private readonly boardA = new THREE.Vector3();
@@ -369,15 +399,57 @@ export class Skater implements PoseSource {
     this.pendingFlick = null;
     this.grinding = false;
     this.balanceMove = null;
-    this.forcedBail = false;
     this.lastGrindSegment = null;
+    this.bailing = false;
+    this.pendingBail = null;
+    this.poseOverride = null;
+    this.collider.setEnabled(true);
     this.trick.landedProgress = 1;
     this.trick.flips = this.trick.shove = 0;
     this.prediction.valid = false;
     this.grounded = this.probeGround(GROUND.probeHeight + 2) !== null;
     if (this.grounded) this.applyContact(this.contact);
     this.syncCollider();
+    if (this.grounded) this.lastSafePosition.copy(this.position);
     this.fsm.start(this.grounded ? 'idle' : 'air');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Chutes.
+
+  /**
+   * Déclenche une chute : la simulation du skateur se fige, le corps part en ragdoll avec la vitesse
+   * actuelle (Game reçoit l'événement), la machine à états passe en `bail`.
+   */
+  triggerBail(cause: BailCause): void {
+    if (this.bailing) return;
+    if (this.balanceMove && this.isManual()) this.endManual('bail');
+    if (this.grinding) {
+      const g = this.grind;
+      this.events.balanceEnd?.(g.type, g.time, g.distance, 'bail');
+      this.grinding = false;
+      this.balanceMove = null;
+    }
+    this.bailing = true;
+    this.grounded = false;
+    this.pushAccel = 0;
+    this.brake = 0;
+    this.grabAmount = 0;
+    this.grabId = null;
+    this.collider.setEnabled(false);
+    const info = this.bailInfo;
+    info.cause = cause;
+    info.velocity.copy(this.velocity);
+    info.position.copy(this.position);
+    info.forward.copy(this.forward);
+    this.events.bail?.(info);
+    if (this.fsm.current !== 'bail') this.fsm.start('bail');
+  }
+
+  /** Relève : le skateur reprend debout, à l'arrêt, sur `position`, tourné vers `forward`. */
+  recover(position: THREE.Vector3, forward: THREE.Vector3): void {
+    this.reset(position, forward);
+    this.recovery = BAIL.recoveryTime;
   }
 
   // ---------------------------------------------------------------------------
@@ -545,6 +617,10 @@ export class Skater implements PoseSource {
   step(dt: number, input: InputSnapshot): void {
     this.input = input;
     this.time += dt;
+    if (this.bailing) {
+      this.fsm.update(dt);
+      return;
+    }
     if (input.pressed.has('ollie')) this.lastOllieTap = this.time;
     if (this.popTime >= 0) this.popTime = this.popTime > 2 ? -1 : this.popTime + dt;
     if (this.landTime >= 0) this.landTime = this.landTime > 2 ? -1 : this.landTime + dt;
@@ -559,6 +635,13 @@ export class Skater implements PoseSource {
     const k = 1 - Math.exp(-GROUND.upSmoothing * dt);
     this.visualUp.lerp(this.up, k).normalize();
     this.syncCollider();
+    if (this.grounded && !this.grinding && this.up.y > SAFE_GROUND_COS) this.lastSafePosition.copy(this.position);
+    if (this.pendingBail) {
+      const cause = this.pendingBail;
+      this.pendingBail = null;
+      this.velocity.copy(this.pendingBailVelocity);
+      this.triggerBail(cause);
+    }
   }
 
   private groundStep(dt: number): void {
@@ -889,9 +972,11 @@ export class Skater implements PoseSource {
       orthonormalize(this.forward, this.up);
     }
     if (reason === 'bail') {
-      this.forcedBail = true;
       const side = this.tmpA.crossVectors(seg.dir, WORLD_UP).normalize();
       this.velocity.addScaledVector(side, -Math.sign(this.balance || 1) * GRIND.bailSideSpeed);
+      this.leaveGround();
+      this.triggerBail('grind');
+      return;
     }
     this.leaveGround();
   }
@@ -991,19 +1076,10 @@ export class Skater implements PoseSource {
     this.balanceMove = null;
   }
 
-  /** Manual raté : les roues avant (ou arrière) claquent, le skateur perd l'équilibre comme à une réception en chute. */
+  /** Manual raté : chute. */
   manualBail(): void {
     this.endManual('bail');
-    this.velocity.multiplyScalar(LANDING.bailSpeedRetention);
-    this.recovery = LANDING.bailRecovery;
-    const info = this.lastLanding;
-    info.quality = 'bail';
-    info.impactSpeed = 0;
-    info.label = 'Manual';
-    info.position.copy(this.position);
-    info.normal.copy(this.up);
-    this.landTime = 0;
-    this.events.land?.(info);
+    this.triggerBail('manual');
   }
 
   /**
@@ -1129,18 +1205,31 @@ export class Skater implements PoseSource {
         hn.addScaledVector(n, -hn.dot(n));
         if (hn.lengthSq() < 1e-8) continue;
         hn.normalize();
-        this.wallResponse(hn);
+        this.wallResponse(hn, 'trip');
         const penetration = HALF_BOARD + BODY.collisionSkin - hit.toi;
         if (penetration > 0) this.position.addScaledVector(hn, penetration * Math.abs(dir.dot(hn)));
       }
     }
   }
 
-  /** Supprime la composante de vitesse entrant dans le mur, avec un léger rebond et du frottement. */
-  private wallResponse(wallNormal: THREE.Vector3): void {
+  /**
+   * Supprime la composante de vitesse entrant dans le mur, avec un léger rebond et du frottement.
+   * Un choc trop violent fait tomber : contre un mur (corps), ou en trébuchant (planche contre un obstacle bas).
+   */
+  private wallResponse(wallNormal: THREE.Vector3, kind: 'wall' | 'trip' = 'wall'): void {
     const v = this.velocity;
     const vn = v.dot(wallNormal);
     if (vn >= 0) return;
+    const threshold = kind === 'trip' ? BAIL.tripImpactSpeed : BAIL.wallImpactSpeed;
+    if (-vn > threshold && !this.pendingBail) {
+      // Obstacle bas (seule la planche bute) ou mur (le corps bute aussi, rayon à hauteur du torse).
+      const tall = kind === 'wall' || this.obstacleAtBodyHeight(wallNormal);
+      this.pendingBail = tall ? 'wall' : 'trip';
+      // Trébucher : le corps garde son élan et passe par-dessus. Mur : il garde peu de sa vitesse entrante.
+      this.pendingBailVelocity.copy(v);
+      if (tall) this.pendingBailVelocity.addScaledVector(wallNormal, -vn * (1 - BAIL.wallImpactKeep));
+      this.pendingBailNormal.copy(wallNormal);
+    }
     const speed = v.length();
     const steepness = speed > 1e-6 ? -vn / speed : 0;
     const retention = 1 - (1 - GROUND.wallSpeedRetention) * steepness;
@@ -1158,6 +1247,13 @@ export class Skater implements PoseSource {
         orthonormalize(f, this.up);
       }
     }
+  }
+
+  /** Vrai si l'obstacle touché par la planche continue à hauteur du torse (mur et non curb). */
+  private obstacleAtBodyHeight(wallNormal: THREE.Vector3): boolean {
+    setVec(this.rayOrigin, this.position.x, this.position.y + BODY_CHECK_HEIGHT, this.position.z);
+    setVec(this.rayDir, -wallNormal.x, -wallNormal.y, -wallNormal.z);
+    return this.physics.castRay(this.rayOrigin, this.rayDir, HALF_BOARD + BODY_CHECK_REACH, this.collider) !== null;
   }
 
   /** Déplace la capsule du corps avec le contrôleur cinématique et applique les chocs contre les murs. */
@@ -1246,7 +1342,7 @@ export class Skater implements PoseSource {
     if (tangentSpeed <= LANDING.yawCheckMinSpeed) yawError = spinError;
 
     // Une simple descente d'arête sans impact notable n'est pas une réception à évaluer.
-    const significant = this.popped || this.forcedBail || impact >= LANDING.minImpactForRecovery;
+    const significant = this.popped || impact >= LANDING.minImpactForRecovery;
     // Board pas encore rattrapé : il reste de la rotation à faire au contact.
     const residual = this.popped ? this.boardResidual() : 0;
     const grabAtContact = this.grabAmount;
@@ -1259,11 +1355,6 @@ export class Skater implements PoseSource {
       // Main encore sur le board : on ne peut pas recevoir l'impact.
       if (grabAtContact > GRAB.landBailAmount) quality = 'bail';
       else if (grabAtContact > GRAB.landSloppyAmount && quality === 'clean') quality = 'sloppy';
-    }
-    // Sortie de grind ratée : la réception est une chute quoi qu'il arrive.
-    if (this.forcedBail) {
-      quality = 'bail';
-      this.forcedBail = false;
     }
     this.grabAmount = 0;
     this.grabId = null;
@@ -1303,6 +1394,7 @@ export class Skater implements PoseSource {
     this.recovery = quality === 'clean' ? LANDING.cleanRecovery : quality === 'sloppy' ? LANDING.sloppyRecovery : LANDING.bailRecovery;
     this.popped = false;
     this.events.land?.(info);
+    if (quality === 'bail') this.triggerBail('landing');
   }
 
   /**
@@ -1432,6 +1524,10 @@ export class Skater implements PoseSource {
   // Sorties pour le rendu.
 
   readPose(position: THREE.Vector3, rotation: THREE.Quaternion): void {
+    if (this.poseOverride) {
+      this.poseOverride.readPose(position, rotation);
+      return;
+    }
     position.copy(this.position);
     const up = this.visualUp;
     const fwd = this.tmpA.copy(this.forward).addScaledVector(up, -this.forward.dot(up));
@@ -1461,6 +1557,14 @@ export class Skater implements PoseSource {
     out.grabAmount = this.grabAmount;
     out.spinRate = this.grounded ? 0 : this.spinRate;
     out.balanceIndex = this.balanceMove ? BALANCE_ORDER.indexOf(this.balanceMove) : -1;
+    if (this.bailing) {
+      // Pendant la chute, la planche est libre et le corps suit le ragdoll : pose neutre.
+      out.lean = out.brake = out.crouch = out.charge = out.feetLift = out.trickFlip = out.trickShove = out.grabAmount = out.spinRate = 0;
+      out.pushPhase = out.popTime = out.landTime = -1;
+      out.grabIndex = out.balanceIndex = -1;
+      out.airborne = true;
+      out.speed = 0;
+    }
     out.balance = this.balance;
     if (this.grinding) out.airborne = false;
   }

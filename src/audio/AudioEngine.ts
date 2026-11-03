@@ -1,4 +1,4 @@
-import { playLand, playPop } from './sfx';
+import { playBoardClatter, playBodyImpact, playLand, playPop } from './sfx';
 
 /**
  * Moteur audio Web Audio. Tous les sons sont synthétisés ; une future
@@ -43,6 +43,16 @@ export class AudioEngine {
   /** Réception de la planche. */
   land(strength: number, sloppy: boolean): void {
     if (this.ctx && this.master && !this.muted) playLand(this.ctx, this.master, strength, sloppy);
+  }
+
+  /** Impact du corps pendant une chute. */
+  bodyImpact(strength: number): void {
+    if (this.ctx && this.master && !this.muted) playBodyImpact(this.ctx, this.master, strength);
+  }
+
+  /** Planche lâchée qui heurte le sol ou le décor. */
+  boardClatter(strength: number): void {
+    if (this.ctx && this.master && !this.muted) playBoardClatter(this.ctx, this.master, strength);
   }
 
   /** Bip court de test (debug). */

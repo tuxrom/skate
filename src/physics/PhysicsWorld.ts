@@ -17,6 +17,23 @@ export interface Vec3 {
   z: number;
 }
 
+/**
+ * Groupes de collision (Rapier : 16 bits d'appartenance, 16 bits de filtre).
+ * - décor : appartient à tout, collisionne avec tout (valeur par défaut des colliders) ;
+ * - ragdoll : collisionne avec le décor seulement, jamais avec ses propres membres ni avec la planche ;
+ * - planche lâchée : idem.
+ * Les requêtes (sondes, caméra) utilisent STATIC_QUERY et ne voient donc que le décor.
+ */
+export const GROUP_DECOR = 0x0001;
+export const GROUP_RAGDOLL = 0x0002;
+export const GROUP_LOOSE_BOARD = 0x0004;
+export function interactionGroups(membership: number, filter: number): number {
+  return ((membership & 0xffff) << 16) | (filter & 0xffff);
+}
+export const RAGDOLL_GROUPS = interactionGroups(GROUP_RAGDOLL, GROUP_DECOR);
+export const LOOSE_BOARD_GROUPS = interactionGroups(GROUP_LOOSE_BOARD, GROUP_DECOR);
+const STATIC_QUERY = interactionGroups(GROUP_DECOR, GROUP_DECOR);
+
 /** Résultat d'un rayon : distance, point, normale, collider et matériau touchés. */
 export interface RayHit {
   toi: number;
@@ -35,6 +52,7 @@ export class PhysicsWorld {
   private readonly materials = new Map<number, SurfaceMaterial>();
   private readonly ray: RAPIER.Ray;
   private probeBall: RAPIER.Ball | null = null;
+  private standCapsule: RAPIER.Capsule | null = null;
   /** Colliders « rail seulement » : on les grinde, on ne roule pas dessus. */
   private readonly grindOnly = new Set<number>();
   /** Filtre qui écarte les rails : sondes de sol et corps du skateur (qui ne doit jamais se poser sur un tube). */
@@ -80,7 +98,7 @@ export class PhysicsWorld {
     this.ray.origin = origin;
     this.ray.dir = dir;
     const filter = groundOnly ? this.notGrindOnly : undefined;
-    const hit = this.world.castRayAndGetNormal(this.ray, maxToi, true, undefined, undefined, exclude, undefined, filter);
+    const hit = this.world.castRayAndGetNormal(this.ray, maxToi, true, undefined, STATIC_QUERY, exclude, undefined, filter);
     if (!hit || hit.timeOfImpact <= 1e-5) return null;
     const t = hit.timeOfImpact;
     return {
@@ -99,8 +117,18 @@ export class PhysicsWorld {
   sphereClearance(from: Vec3, dir: Vec3, maxDist: number, radius: number, exclude?: RAPIER.Collider): number {
     if (!this.probeBall || this.probeBall.radius !== radius) this.probeBall = new this.rapier.Ball(radius);
     const ball = this.probeBall;
-    const hit = this.world.castShape(from, IDENTITY, dir, ball, 0, maxDist, true, undefined, undefined, exclude);
+    // Un départ déjà au contact (point visé collé à un mur) ne bloque pas : on s'en éloigne.
+    const hit = this.world.castShape(from, IDENTITY, dir, ball, 0, maxDist, false, undefined, STATIC_QUERY, exclude);
     return hit ? hit.time_of_impact : maxDist;
+  }
+
+  /** Vrai si une capsule verticale (pieds à `foot`) ne touche aucun élément du décor hors rails. */
+  isStandingSpaceFree(foot: Vec3, halfHeight: number, radius: number, lift: number): boolean {
+    if (!this.standCapsule || this.standCapsule.halfHeight !== halfHeight || this.standCapsule.radius !== radius) {
+      this.standCapsule = new this.rapier.Capsule(halfHeight, radius);
+    }
+    const center = { x: foot.x, y: foot.y + lift + radius + halfHeight, z: foot.z };
+    return this.world.intersectionWithShape(center, IDENTITY, this.standCapsule, undefined, STATIC_QUERY, undefined, undefined, this.notGrindOnly) === null;
   }
 
   dispose(): void {

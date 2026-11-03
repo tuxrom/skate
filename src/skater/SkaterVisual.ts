@@ -1,4 +1,4 @@
-import type * as THREE from 'three';
+import * as THREE from 'three';
 import { InterpolatedBody } from '@/physics/InterpolatedBody';
 import type { Skater } from './Skater';
 import { copyPose, createPose, type SkaterRig } from './SkaterRig';
@@ -9,6 +9,11 @@ export class SkaterVisual {
   private readonly prev = createPose();
   private readonly curr = createPose();
   private readonly out = createPose();
+  /** Fondu de la pose affichée depuis une pose de départ (planche ramenée aux pieds après une chute). */
+  private readonly blendPos = new THREE.Vector3();
+  private readonly blendQuat = new THREE.Quaternion();
+  private blendTime = 0;
+  private blendDuration = 0;
 
   constructor(
     private readonly skater: Skater,
@@ -35,9 +40,24 @@ export class SkaterVisual {
     copyPose(this.prev, this.curr);
   }
 
+  /** Démarre un fondu depuis la pose actuellement affichée vers la pose simulée, sur `duration` secondes. */
+  blendFromCurrent(duration: number): void {
+    this.blendPos.copy(this.rig.root.position);
+    this.blendQuat.copy(this.rig.root.quaternion);
+    this.blendTime = 0;
+    this.blendDuration = duration;
+  }
+
   /** À chaque frame rendue. */
   render(alpha: number, dt: number): void {
     this.body.apply(alpha);
+    if (this.blendTime < this.blendDuration) {
+      this.blendTime += dt;
+      const t = Math.min(1, this.blendTime / this.blendDuration);
+      const w = 1 - t * t * (3 - 2 * t);
+      this.rig.root.position.lerp(this.blendPos, w);
+      this.rig.root.quaternion.slerp(this.blendQuat, w);
+    }
     const a = this.prev;
     const b = this.curr;
     const o = this.out;

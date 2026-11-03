@@ -6,7 +6,9 @@ import { CameraRig, type CameraTarget } from './CameraRig';
 import { PhysicsWorld, type Rapier } from '@/physics/PhysicsWorld';
 import { Level, SPAWN } from '@/world/Level';
 import type { AssetProvider } from '@/world/assets';
-import { Skater, type ActiveTrick, type LandingInfo } from '@/skater/Skater';
+import { Skater, type ActiveTrick, type BailInfo, type LandingInfo } from '@/skater/Skater';
+import { BailController } from '@/skater/BailController';
+import { createJoints } from '@/skater/SkaterRig';
 import { trickName } from '@/skater/tricks';
 import { FlickDebugPanel } from '@/ui/FlickDebugPanel';
 import { BalanceMeter } from '@/ui/BalanceMeter';
@@ -21,6 +23,8 @@ import { DustEffect } from '@/world/DustEffect';
 
 /** Vitesse au-dessus de laquelle le sens de marche oriente la caméra (m/s). */
 const CAMERA_TRAVEL_MIN_SPEED = 0.6;
+/** Pendant une chute, la caméra vise le bassin abaissé de cette hauteur (m), pour cadrer le corps au sol. */
+const BAIL_CAMERA_DROP = 0.5;
 
 export interface GameOptions {
   container: HTMLElement;
@@ -44,6 +48,12 @@ export class Game {
   private readonly pauseOverlay: PauseOverlay;
   private readonly flickPanel: FlickDebugPanel;
   private readonly balanceMeter: BalanceMeter;
+  private readonly bail: BailController;
+  private readonly bailPose = createJoints();
+  private readonly bailBoardPos = new THREE.Vector3();
+  private readonly bailBoardQuat = new THREE.Quaternion();
+  private readonly cameraFocus = new THREE.Vector3();
+  private renderAlpha = 1;
   /** Dernier grind ou manual terminé, pour le debug (les combos de l'étape 7 s'en serviront). */
   private lastBalanceText = '-';
   private balanceMoves = 0;
@@ -61,6 +71,7 @@ export class Game {
     landingValid: false,
     landingPoint: new THREE.Vector3(),
     landingTime: 0,
+    lookAheadScale: 1,
   };
   /** Impact en attente pour la caméra, appliqué au prochain rendu (m/s). */
   private pendingImpact = 0;
@@ -68,6 +79,7 @@ export class Game {
   /** Dernière réception, pour le debug et les tests. */
   private landings = 0;
   private lastLandingText = '-';
+  private lastBailText = '-';
   private lastTrickText = '-';
   private lastTrick = '';
   private lastTrickScore = 0;
@@ -89,12 +101,14 @@ export class Game {
 
     this.skater = new Skater(this.physics);
     this.skater.grinds = this.level.grinds;
+    this.bail = new BailController(this.physics, this.skater);
     this.skaterVisual = new SkaterVisual(this.skater, opts.assets.createSkater());
     this.scene.add(this.skaterVisual.object);
     this.scene.add(this.dust.object);
     this.skater.events = {
       pop: (charge, position, trick) => this.onPop(charge, position, trick),
       land: (info) => this.onLand(info),
+      bail: (info) => this.onBail(info),
       balanceStart: () => {
         this.balanceMoves++;
       },
@@ -138,6 +152,7 @@ export class Game {
 
   /** Téléporte le skateur à l'arrêt (debug et tests). yaw = 0 regarde vers -Z. */
   debugTeleport(x: number, z: number, yaw: number): void {
+    this.bail.end();
     this.skater.reset(new THREE.Vector3(x, 0, z), new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)));
     this.skaterVisual.teleportSync();
     this.skaterVisual.render(1, 0);
@@ -189,6 +204,12 @@ export class Game {
       gestureEnd: this.input.flickRecognizer.lastEvent?.features.endAngle ?? 0,
       gestureMinR: this.input.flickRecognizer.lastEvent?.features.minRadius ?? 0,
       gestureDuration: this.input.flickRecognizer.lastEvent?.features.duration ?? 0,
+      bailing: sk.bailing,
+      bailPhase: this.bail.phase,
+      bailCause: this.bail.cause,
+      bails: this.bail.count,
+      ragdollLowest: Number.isFinite(this.bail.lowestPoint) ? this.bail.lowestPoint : 0,
+      ragdollMaxSpeed: this.bail.maxPartSpeed,
       grinding: sk.grinding,
       grindReject: sk.grindReject,
       balanceMove: sk.balanceMove ?? '',
@@ -236,7 +257,19 @@ export class Game {
     this.lastLandingText = `${info.label} : ${info.quality}, ${info.impactSpeed.toFixed(1)} m/s, écart ${((info.spinError * 180) / Math.PI).toFixed(0)}°`;
   }
 
+  /** Chute : le ragdoll part de la pose affichée, la planche de sa pose affichée. */
+  private onBail(info: BailInfo): void {
+    this.skaterVisual.rig.captureJoints(this.bailPose);
+    this.bailBoardPos.copy(this.skaterVisual.object.position);
+    this.bailBoardQuat.copy(this.skaterVisual.object.quaternion);
+    this.bail.start(info, this.bailPose, this.bailBoardPos, this.bailBoardQuat);
+    this.skater.poseOverride = this.bail;
+    this.skaterVisual.teleportSync();
+    this.lastBailText = info.cause;
+  }
+
   private respawn(): void {
+    this.bail.end();
     this.skater.reset(SPAWN.position, SPAWN.forward);
     this.skaterVisual.teleportSync();
     this.skaterVisual.render(1, 0);
@@ -254,6 +287,16 @@ export class Game {
 
     this.skater.step(dt, input);
     this.physics.step();
+    if (this.bail.phase !== 'none') {
+      const wasRagdoll = this.bail.phase === 'ragdoll';
+      this.bail.fixedStep(dt, (strength, board) => (board ? this.audio.boardClatter(strength) : this.audio.bodyImpact(strength)));
+      if (wasRagdoll && this.bail.phase !== 'ragdoll') {
+        // Relève : le skateur est replacé debout ; la planche glisse de sa position au sol jusqu'aux pieds.
+        this.skater.poseOverride = null;
+        this.skaterVisual.blendFromCurrent(BAIL.getUpTime);
+        this.skaterVisual.teleportSync();
+      }
+    }
     this.skaterVisual.capture();
     if (this.skater.position.y < WORLD.killPlaneY) this.respawn();
   }
@@ -265,7 +308,9 @@ export class Game {
     }
     if (input.pressed.has('pause')) this.setPaused(!this.paused);
     if (input.pressed.has('reset')) {
-      this.respawn();
+      // Pendant une chute, R relève le skateur sur place ; sinon retour au départ.
+      if (this.bail.phase === 'ragdoll') this.bail.requestGetUp();
+      else this.respawn();
       this.setPaused(false);
     }
   }
@@ -284,6 +329,17 @@ export class Game {
   private updateCameraTarget(): void {
     const t = this.cameraTarget;
     const sk = this.skater;
+    if (this.bail.phase === 'ragdoll') {
+      // Pendant la chute, la caméra suit le bassin sans changer de cap.
+      this.bail.cameraFocus(this.renderAlpha, this.cameraFocus);
+      t.position.set(this.cameraFocus.x, this.cameraFocus.y - BAIL_CAMERA_DROP, this.cameraFocus.z);
+      t.airborne = false;
+      t.landingValid = false;
+      t.speed = 0;
+      t.lookAheadScale = 0;
+      return;
+    }
+    t.lookAheadScale = 1;
     t.position.copy(this.skaterVisual.object.position);
     const along = sk.velocity.dot(sk.forward);
     if (Math.abs(along) > CAMERA_TRAVEL_MIN_SPEED) this.travelSign = along < 0 ? -1 : 1;
@@ -306,6 +362,9 @@ export class Game {
     // En pause, on fige sur le dernier état simulé pour ne pas osciller entre deux poses.
     const a = this.paused ? 1 : alpha;
     const dt = this.paused ? 0 : frameDt;
+    this.renderAlpha = a;
+    const rag = this.bail.renderJoints(a);
+    this.skaterVisual.rig.applyRagdoll(rag ? rag.joints : null, rag ? rag.weight : 0);
     this.skaterVisual.render(a, dt);
     this.updateCameraTarget();
     if (!this.paused) {
@@ -336,6 +395,7 @@ export class Game {
       grind: sk.balanceMove ? `${BALANCE_MOVES[sk.balanceMove].name} jauge ${sk.balance.toFixed(2)}` : this.lastBalanceText,
       air: sk.grounded ? '-' : `rot ${((sk.spinAngle * 180) / Math.PI).toFixed(0)}°  grab ${sk.grabId ?? '-'} ${(sk.grabAmount * 100).toFixed(0)} %`,
       land: this.lastLandingText,
+      bail: this.bail.phase === 'none' ? this.lastBailText : `${this.bail.phase} (${this.bail.cause})`,
     });
     this.flickPanel.update(this.input.flickRecognizer, this.lastFlickX, this.lastFlickY);
     this.balanceMeter.update(sk.balanceMove ? BALANCE_MOVES[sk.balanceMove].name : null, sk.balance);
