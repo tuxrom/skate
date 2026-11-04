@@ -4,10 +4,10 @@ import type { PadFamily } from '@/core/Input';
 import type { ChallengeSystem } from '@/progress/ChallengeSystem';
 import type { Profile } from '@/progress/Profile';
 import { BOARDS, COLORS, isUnlocked, type BoardDef, type Customization } from '@/progress/unlocks';
-import type { PadLayout } from '@/save/SaveData';
+import type { PadLayout, TouchMode } from '@/save/SaveData';
 import type { ScoreSystem } from '@/score/ScoreSystem';
 import { CHALLENGES, type ChallengeDef } from '@/world/challenges';
-import { GESTURES, KEYBOARD_BINDINGS, PAD_LABELS, gestureSvg, padBindings, type Binding } from './helpContent';
+import { GESTURES, KEYBOARD_BINDINGS, PAD_LABELS, TOUCH_BINDINGS, gestureSvg, padBindings, type Binding } from './helpContent';
 import { fmt } from './Hud';
 
 export type ScreenId = 'home' | 'pause' | 'settings' | 'custom' | 'objectives' | 'help';
@@ -29,6 +29,10 @@ export interface MenuHost {
   padFamily(): PadFamily;
   /** Son d'interface. */
   click(): void;
+  /** Interface tactile affichée. */
+  readonly touchMode: boolean;
+  /** Ouvre l'éditeur de disposition des boutons tactiles. */
+  editTouchLayout(): void;
 }
 
 /** Délai pour confirmer l'effacement de la progression (ms). */
@@ -97,6 +101,11 @@ export class Menus {
       this.host.click();
       this.host.resume();
     }
+  }
+
+  /** Masque les menus sans fermer la pile (éditeur de disposition tactile). */
+  setHidden(hidden: boolean): void {
+    this.layer.style.visibility = hidden ? 'hidden' : '';
   }
 
   close(): void {
@@ -200,7 +209,9 @@ export class Menus {
     this.button(b, 'Réglages', () => this.push('settings'), '', 'settings');
     this.button(b, 'Aide et gestes', () => this.push('help'), '', 'help');
     const pad = PAD_LABELS[this.host.padFamily()];
-    add(p, 'p').textContent = `Échap ou ${pad.start} : menu en jeu. Manette : croix pour naviguer, ${pad.a} valider, ${pad.b} retour.`;
+    add(p, 'p').textContent = this.host.touchMode
+      ? 'Pouce gauche : diriger. Pouce droit : flicks au glissé. Bouton ❚❚ : menu en jeu.'
+      : `Échap ou ${pad.start} : menu en jeu. Manette : croix pour naviguer, ${pad.a} valider, ${pad.b} retour.`;
   }
 
   private buildPause(p: HTMLElement): void {
@@ -271,7 +282,7 @@ export class Menus {
     );
     add(p, 'p').textContent = 'Plus haut : gestes reconnus plus facilement, au risque de confondre deux tricks voisins.';
     this.range(
-      row(p, 'Sensibilité de la souris'),
+      row(p, 'Sensibilité du glissé (souris, doigt)'),
       'mouse',
       SETTINGS_LIMITS.mouseSensitivityMin,
       SETTINGS_LIMITS.mouseSensitivityMax,
@@ -283,10 +294,20 @@ export class Menus {
     this.segmented<PadLayout>(row(p, 'Manette'), 'pad', [['auto', 'Auto'], ['xbox', 'Xbox'], ['playstation', 'PlayStation']], s.padLayout, (v) =>
       prof.updateSettings({ padLayout: v }),
     );
+    add(p, 'h3').textContent = 'Tactile';
+    this.segmented<TouchMode>(row(p, 'Contrôles tactiles'), 'touch', [['auto', 'Auto'], ['on', 'Toujours'], ['off', 'Jamais']], s.touchMode, (v) =>
+      prof.updateSettings({ touchMode: v }),
+    );
+    const canVibrate = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
+    this.toggle(row(p, canVibrate ? 'Vibrations' : 'Vibrations (non prises en charge ici)'), 'haptics', s.haptics, (v) => prof.updateSettings({ haptics: v }));
+    this.button(p, 'Disposer les boutons tactiles', () => this.host.editTouchLayout(), 'small', 'touchLayout');
+    add(p, 'p').textContent = 'La sensibilité du glissé règle aussi le swipe des flicks au doigt.';
     add(p, 'h3').textContent = 'Clavier et souris';
     bindingsTable(p, KEYBOARD_BINDINGS);
     add(p, 'h3').textContent = `Manette (${this.host.padFamily() === 'playstation' ? 'PlayStation' : 'Xbox'})`;
     bindingsTable(p, padBindings(PAD_LABELS[this.host.padFamily()]));
+    add(p, 'h3').textContent = 'Tactile';
+    bindingsTable(p, TOUCH_BINDINGS);
 
     add(p, 'h3').textContent = 'Données';
     add(p, 'p').textContent = `Sauvegarde : ${backendLabel(prof.backend)}.`;
@@ -390,7 +411,7 @@ export class Menus {
 
   private buildHelp(p: HTMLElement): void {
     this.header(p, 'Aide et gestes');
-    add(p, 'h3').textContent = 'Flicks au stick droit (souris glissée ou flèches)';
+    add(p, 'h3').textContent = 'Flicks au stick droit (souris glissée, swipe au doigt ou flèches)';
     add(p, 'p').textContent = 'Tout geste commence stick en bas (zone jaune) : le skateur charge, la durée règle la hauteur. Le trait ou l’arc qui suit choisit le trick.';
     const g = add(p, 'div', 'gestures');
     for (const ge of GESTURES) {
@@ -423,6 +444,8 @@ export class Menus {
     bindingsTable(p, KEYBOARD_BINDINGS);
     add(p, 'h3').textContent = `Manette (${this.host.padFamily() === 'playstation' ? 'PlayStation' : 'Xbox'})`;
     bindingsTable(p, padBindings(PAD_LABELS[this.host.padFamily()]));
+    add(p, 'h3').textContent = 'Tactile';
+    bindingsTable(p, TOUCH_BINDINGS);
   }
 
   // ---------------------------------------------------------------------------

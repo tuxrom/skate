@@ -36,7 +36,7 @@ export interface InputSnapshot {
   pressed: ReadonlySet<ButtonAction>;
 }
 
-/** Source d'input enfichable (clavier, manette, contrôles tactiles à l'étape 9). */
+/** Source d'input enfichable (clavier, souris, manette, contrôles tactiles). */
 export interface InputSource {
   /** Écrit son état dans le snapshot en cours de construction. */
   sample(target: MutableSnapshot): void;
@@ -169,23 +169,108 @@ export class KeyboardSource implements InputSource {
 }
 
 /**
- * Souris : glisser bouton gauche maintenu déplace le stick droit autour du point d'appui.
- * Un glissé de INPUT.mouseStickRadiusPx met le stick en butée ; au-delà de mouseOriginFollow fois
- * ce rayon, l'origine suit la souris pour qu'un retour en arrière réponde sans course morte.
+ * Stick virtuel au glissé, commun à la souris et au tactile : le déplacement depuis le point d'appui
+ * donne la direction et l'amplitude. Un glissé de `radius` met le stick en butée ; au-delà de
+ * `follow` fois ce rayon, l'origine suit le doigt ou la souris, pour qu'un retour en arrière réponde
+ * sans course morte. Coordonnées écran (px CSS, y vers le bas), stick en repère y vers le haut.
+ */
+export class DragStick {
+  /** Vrai du premier appui jusqu'à la dernière lecture après le relâchement. */
+  active = false;
+  originX = 0;
+  originY = 0;
+  /** Position du stick, dans le disque unité. */
+  readonly value = { x: 0, y: 0 };
+  /**
+   * Relâché, mais la dernière position n'a pas encore été lue. Un flick vif peut finir dans la même image
+   * que le relâchement : sans ce délai d'une lecture, la reconnaissance verrait le stick sauter au centre
+   * sans jamais atteindre la sortie du geste.
+   */
+  private releasing = false;
+
+  constructor(
+    /** Rayon de butée (px CSS), relu à chaque déplacement (sensibilité réglable). */
+    private readonly radius: () => number,
+    private readonly follow: number,
+  ) {}
+
+  /** Doigt ou bouton encore posé (faux dès le relâchement, même avant la dernière lecture). */
+  get isDown(): boolean {
+    return this.active && !this.releasing;
+  }
+
+  start(x: number, y: number): void {
+    this.active = true;
+    this.releasing = false;
+    this.originX = x;
+    this.originY = y;
+    this.value.x = this.value.y = 0;
+  }
+
+  move(x: number, y: number): void {
+    if (!this.isDown) return;
+    const radius = Math.max(1, this.radius());
+    let dx = x - this.originX;
+    let dy = y - this.originY;
+    const len = Math.hypot(dx, dy);
+    const follow = radius * this.follow;
+    if (len > follow) {
+      // L'origine glisse vers le point : la course au-delà de la butée reste bornée.
+      this.originX += (dx * (len - follow)) / len;
+      this.originY += (dy * (len - follow)) / len;
+      dx = x - this.originX;
+      dy = y - this.originY;
+    }
+    const d = Math.hypot(dx, dy) || 1;
+    const r = Math.min(1, d / radius);
+    this.value.x = (dx / d) * r;
+    this.value.y = (-dy / d) * r;
+  }
+
+  /** Relâchement : la position reste lisible une fois, puis le stick revient au centre. */
+  end(): void {
+    if (this.active) this.releasing = true;
+  }
+
+  /** Relâchement immédiat, sans dernière lecture (menu ouvert, perte de focus). */
+  reset(): void {
+    this.active = this.releasing = false;
+    this.value.x = this.value.y = 0;
+  }
+
+  /** Lit la position (à chaque pas fixe) ; après un relâchement, cette lecture est la dernière. */
+  read(): { readonly x: number; readonly y: number } {
+    if (this.releasing) {
+      this.releasing = false;
+      this.active = false;
+      this.readout.x = this.value.x;
+      this.readout.y = this.value.y;
+      this.value.x = this.value.y = 0;
+      return this.readout;
+    }
+    return this.value;
+  }
+  private readonly readout = { x: 0, y: 0 };
+
+  /** Ajoute la position du stick à `target` (si actif), borné à [-1, 1]. */
+  addTo(target: { x: number; y: number }): void {
+    if (!this.active) return;
+    const v = this.read();
+    target.x = clampUnit(target.x + v.x);
+    target.y = clampUnit(target.y + v.y);
+  }
+}
+
+/**
+ * Souris : glisser bouton gauche maintenu déplace le stick droit autour du point d'appui (DragStick,
+ * rayon INPUT.mouseStickRadiusPx / sensibilité). Bouton droit tenu : grab, le glissé choisit le grab.
  * Relâcher le bouton ramène le stick au centre.
  */
 export class MouseFlickSource implements InputSource {
-  private active = false;
-  private originX = 0;
-  private originY = 0;
-  private readonly stick = { x: 0, y: 0 };
-  /** Bouton droit : grab, la direction du glissé choisit le grab. */
-  private grabbing = false;
-  private grabOriginX = 0;
-  private grabOriginY = 0;
-  private readonly grabStick = { x: 0, y: 0 };
   /** Sensibilité (réglages) : un glissé de mouseStickRadiusPx / sensitivity met le stick en butée. */
   sensitivity = 1;
+  private readonly flick = new DragStick(() => INPUT.mouseStickRadiusPx / this.sensitivity, INPUT.mouseOriginFollow);
+  private readonly grab = new DragStick(() => INPUT.mouseStickRadiusPx / this.sensitivity, INPUT.mouseOriginFollow);
 
   constructor(private readonly element: HTMLElement) {
     element.addEventListener('pointerdown', this.onDown);
@@ -196,14 +281,11 @@ export class MouseFlickSource implements InputSource {
   }
 
   sample(s: MutableSnapshot): void {
-    if (this.grabbing) {
+    if (this.grab.active) {
       s.held.add('grab');
-      s.grab.x = clampUnit(s.grab.x + this.grabStick.x);
-      s.grab.y = clampUnit(s.grab.y + this.grabStick.y);
+      this.grab.addTo(s.grab);
     }
-    if (!this.active) return;
-    s.flick.x = clampUnit(s.flick.x + this.stick.x);
-    s.flick.y = clampUnit(s.flick.y + this.stick.y);
+    this.flick.addTo(s.flick);
   }
 
   /**
@@ -220,31 +302,8 @@ export class MouseFlickSource implements InputSource {
   private readonly onMove = (e: PointerEvent): void => {
     if (e.pointerType !== 'mouse') return;
     this.syncButtons(e);
-    if (this.grabbing) {
-      const gx = e.clientX - this.grabOriginX;
-      const gy = e.clientY - this.grabOriginY;
-      const gl = Math.hypot(gx, gy) || 1;
-      const gr = Math.min(1, gl / (INPUT.mouseStickRadiusPx / this.sensitivity));
-      this.grabStick.x = (gx / gl) * gr;
-      this.grabStick.y = (-gy / gl) * gr;
-    }
-    if (!this.active) return;
-    const radius = INPUT.mouseStickRadiusPx / this.sensitivity;
-    let dx = e.clientX - this.originX;
-    let dy = e.clientY - this.originY;
-    const len = Math.hypot(dx, dy);
-    const follow = radius * INPUT.mouseOriginFollow;
-    if (len > follow) {
-      // L'origine glisse vers la souris : la course au-delà de la butée reste bornée.
-      this.originX += (dx * (len - follow)) / len;
-      this.originY += (dy * (len - follow)) / len;
-      dx = e.clientX - this.originX;
-      dy = e.clientY - this.originY;
-    }
-    const r = Math.min(1, Math.hypot(dx, dy) / radius);
-    const d = Math.hypot(dx, dy) || 1;
-    this.stick.x = (dx / d) * r;
-    this.stick.y = (-dy / d) * r;
+    this.grab.move(e.clientX, e.clientY);
+    this.flick.move(e.clientX, e.clientY);
   };
 
   private readonly onUp = (e: PointerEvent): void => {
@@ -256,24 +315,10 @@ export class MouseFlickSource implements InputSource {
   private syncButtons(e: PointerEvent): void {
     const left = (e.buttons & 1) !== 0;
     const right = (e.buttons & 2) !== 0;
-    if (left && !this.active) {
-      this.active = true;
-      this.originX = e.clientX;
-      this.originY = e.clientY;
-      this.stick.x = this.stick.y = 0;
-    } else if (!left && this.active) {
-      this.active = false;
-      this.stick.x = this.stick.y = 0;
-    }
-    if (right && !this.grabbing) {
-      this.grabbing = true;
-      this.grabOriginX = e.clientX;
-      this.grabOriginY = e.clientY;
-      this.grabStick.x = this.grabStick.y = 0;
-    } else if (!right && this.grabbing) {
-      this.grabbing = false;
-      this.grabStick.x = this.grabStick.y = 0;
-    }
+    if (left && !this.flick.isDown) this.flick.start(e.clientX, e.clientY);
+    else if (!left && this.flick.isDown) this.flick.end();
+    if (right && !this.grab.isDown) this.grab.start(e.clientX, e.clientY);
+    else if (!right && this.grab.isDown) this.grab.end();
   }
 
   private readonly onContextMenu = (e: Event): void => e.preventDefault();
@@ -315,12 +360,19 @@ export function detectPadFamily(id: string): PadFamily {
 export class GamepadSource implements InputSource {
   /** Identifiant de la dernière manette active, pour adapter les libellés. */
   lastPadId = '';
+  /** Vrai si une manette a servi pendant le dernier pas (bouton ou stick franchement poussé). */
+  activeThisStep = false;
 
   sample(s: MutableSnapshot): void {
+    this.activeThisStep = false;
     if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
     for (const pad of navigator.getGamepads()) {
       if (!pad || !pad.connected || pad.axes.length < 4) continue;
-      if (pad.id !== this.lastPadId && pad.buttons.some((b) => b.pressed)) this.lastPadId = pad.id;
+      const used = pad.buttons.some((b) => b.pressed) || pad.axes.some((a) => Math.abs(a) > 0.5);
+      if (used) {
+        this.activeThisStep = true;
+        if (pad.id !== this.lastPadId) this.lastPadId = pad.id;
+      }
       s.move.x = clampUnit(s.move.x + (pad.axes[0] ?? 0));
       s.move.y = clampUnit(s.move.y - (pad.axes[1] ?? 0));
       // Gâchette de grab tenue : le stick droit choisit le grab au lieu de flicker.

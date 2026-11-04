@@ -1,9 +1,19 @@
 import { PROGRESSION, SETTINGS_LIMITS } from '@/config/physics';
-import type { GraphicsQuality } from '@/config/render';
+import { TOUCH, type GraphicsQuality, type TouchButtonId, type TouchButtonLayout } from '@/config/render';
 import type { ScoreRecords } from '@/score/ScoreSystem';
 import { BOARDS, COLORS, DEFAULT_CUSTOMIZATION, type Customization } from '@/progress/unlocks';
 
 export type PadLayout = 'auto' | 'xbox' | 'playstation';
+/** Contrôles tactiles : détectés automatiquement, toujours affichés, ou jamais. */
+export type TouchMode = 'auto' | 'on' | 'off';
+
+export const TOUCH_BUTTON_IDS: readonly TouchButtonId[] = ['push', 'grab', 'manual', 'grind', 'reset', 'pause'];
+
+export function defaultTouchLayout(): Record<TouchButtonId, TouchButtonLayout> {
+  const out = {} as Record<TouchButtonId, TouchButtonLayout>;
+  for (const id of TOUCH_BUTTON_IDS) out[id] = { ...TOUCH.defaultLayout[id] };
+  return out;
+}
 
 /** Réglages du joueur. */
 export interface Settings {
@@ -17,6 +27,11 @@ export interface Settings {
   mouseSensitivity: number;
   /** Libellés des boutons de manette. */
   padLayout: PadLayout;
+  touchMode: TouchMode;
+  /** Retour haptique (navigator.vibrate) en mode tactile. */
+  haptics: boolean;
+  /** Position et taille des boutons tactiles. */
+  touchLayout: Record<TouchButtonId, TouchButtonLayout>;
 }
 
 export interface ChallengeProgress {
@@ -45,7 +60,17 @@ function defaultQuality(): GraphicsQuality {
 }
 
 export function defaultSettings(): Settings {
-  return { quality: defaultQuality(), volume: 0.8, muted: false, flickSensitivity: 1, mouseSensitivity: 1, padLayout: 'auto' };
+  return {
+    quality: defaultQuality(),
+    volume: 0.8,
+    muted: false,
+    flickSensitivity: 1,
+    mouseSensitivity: 1,
+    padLayout: 'auto',
+    touchMode: 'auto',
+    haptics: true,
+    touchLayout: defaultTouchLayout(),
+  };
 }
 
 export function defaultSave(): SaveData {
@@ -87,6 +112,18 @@ export function sanitizeSave(raw: unknown): SaveData {
     d.flickSensitivity = clamp(num(s.flickSensitivity, 1), SETTINGS_LIMITS.flickSensitivityMin, SETTINGS_LIMITS.flickSensitivityMax);
     d.mouseSensitivity = clamp(num(s.mouseSensitivity, 1), SETTINGS_LIMITS.mouseSensitivityMin, SETTINGS_LIMITS.mouseSensitivityMax);
     if (s.padLayout === 'xbox' || s.padLayout === 'playstation' || s.padLayout === 'auto') d.padLayout = s.padLayout;
+    if (s.touchMode === 'auto' || s.touchMode === 'on' || s.touchMode === 'off') d.touchMode = s.touchMode;
+    if (typeof s.haptics === 'boolean') d.haptics = s.haptics;
+    if (isObject(s.touchLayout)) {
+      for (const id of TOUCH_BUTTON_IDS) {
+        const b = s.touchLayout[id];
+        if (!isObject(b)) continue;
+        const def = d.touchLayout[id];
+        def.x = clamp(num(b.x, def.x), 0, 1);
+        def.y = clamp(num(b.y, def.y), 0, 1);
+        def.size = clamp(num(b.size, def.size), TOUCH.sizeMin, TOUCH.sizeMax);
+      }
+    }
   }
   if (isObject(raw.custom)) {
     const c = raw.custom;

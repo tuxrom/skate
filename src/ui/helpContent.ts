@@ -35,6 +35,17 @@ export const KEYBOARD_BINDINGS: readonly Binding[] = [
   { action: 'Menu, retour', keys: ['Échap'] },
 ];
 
+export const TOUCH_BINDINGS: readonly Binding[] = [
+  { action: 'Direction, frein, groupé', keys: ['Pouce gauche : joystick sous le doigt'] },
+  { action: 'Pousser, accélérer', keys: ['Pousser', 'joystick à fond vers l’avant'] },
+  { action: 'Flicks, ollie', keys: ['Pouce droit : glisser (bas puis haut = ollie)'] },
+  { action: 'Grab', keys: ['Grab tenu + glisser à droite'] },
+  { action: 'Manual', keys: ['Manual tenu', 'équilibre au joystick'] },
+  { action: 'Choix du grind', keys: ['Grind tenu : nosegrind, lipslide', 'joystick en arrière : 5-0'] },
+  { action: 'Se relever, retour au départ', keys: ['↺'] },
+  { action: 'Menu', keys: ['❚❚'] },
+];
+
 export function padBindings(l: PadLabels): Binding[] {
   return [
     { action: 'Direction, frein, groupé', keys: ['Stick gauche'] },

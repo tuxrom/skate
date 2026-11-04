@@ -125,6 +125,11 @@ export class Hud {
     this.refreshSession();
   }
 
+  /** Relit l'indication de menu (clavier, manette ou tactile). */
+  refreshHints(): void {
+    this.hint.textContent = this.menuHint();
+  }
+
   setVisible(visible: boolean): void {
     if (visible === this.visible) return;
     this.visible = visible;

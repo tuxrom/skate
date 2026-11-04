@@ -15,7 +15,7 @@ import { BALANCE_MOVES } from '@/skater/grinds';
 import { SkaterVisual } from '@/skater/SkaterVisual';
 import { AudioEngine } from '@/audio/AudioEngine';
 import { DebugOverlay } from '@/ui/DebugOverlay';
-import { DEBUG, FX, HUD, QUALITY_PRESETS } from '@/config/render';
+import { DEBUG, FX, HUD, QUALITY_PRESETS, TOUCH } from '@/config/render';
 import { BAIL, PROGRESSION, WORLD } from '@/config/physics';
 import { DustEffect } from '@/world/DustEffect';
 import { ScoreSystem } from '@/score/ScoreSystem';
@@ -28,6 +28,7 @@ import type { Settings } from '@/save/SaveData';
 import { Hud } from '@/ui/Hud';
 import { Menus, type MenuHost } from '@/ui/Menus';
 import { installStyles } from '@/ui/styles';
+import { TouchControls } from '@/ui/TouchControls';
 import { PAD_LABELS } from '@/ui/helpContent';
 
 /** Vitesse au-dessus de laquelle le sens de marche oriente la caméra (m/s). */
@@ -82,6 +83,7 @@ export class Game implements MenuHost {
   private readonly zoneMarkers: ZoneMarkers;
   private readonly gamepad = new GamepadSource();
   private readonly mouse: MouseFlickSource;
+  readonly touch: TouchControls;
   mode: GameMode = 'home';
   private orbitAngle = 0;
   private readonly camLook = new THREE.Vector3();
@@ -124,6 +126,8 @@ export class Game implements MenuHost {
     this.input.addSource(new KeyboardSource());
     this.input.addSource(this.gamepad);
     this.input.addSource(this.mouse);
+    this.touch = new TouchControls(opts.container);
+    this.input.addSource(this.touch);
 
     this.physics = new PhysicsWorld(opts.rapier);
     this.level = new Level(this.scene, this.physics, opts.assets);
@@ -177,6 +181,7 @@ export class Game implements MenuHost {
     });
     this.menus = new Menus(opts.container, this);
     this.menus.onChange = () => this.onMenuChange();
+    this.touch.onModeChange = (on) => this.onTouchMode(on);
     this.wireProgress();
     this.loop = new GameLoop(
       {
@@ -190,6 +195,7 @@ export class Game implements MenuHost {
     this.physics.step();
     this.respawn();
     this.applySettings(this.profile.settings);
+    this.onTouchMode(this.touch.touchMode);
     this.applyAppearance();
     this.refreshMarkers();
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -235,6 +241,40 @@ export class Game implements MenuHost {
     this.audio.uiClick();
   }
 
+  get touchMode(): boolean {
+    return this.touch.touchMode;
+  }
+
+  /** Éditeur de disposition des boutons tactiles, par-dessus le jeu ; les menus reviennent à la fin. */
+  editTouchLayout(): void {
+    this.menus.setHidden(true);
+    this.touch.startEditing(
+      (layout) => this.profile.updateSettings({ touchLayout: layout }),
+      () => {
+        this.menus.setHidden(false);
+        this.menus.refresh();
+      },
+    );
+  }
+
+  /** Bascule entre l'interface PC et l'interface tactile. */
+  private onTouchMode(on: boolean): void {
+    document.documentElement.classList.toggle('touch-ui', on);
+    this.hud.refreshHints();
+    this.menus.refresh();
+  }
+
+  /** Retour haptique, en mode tactile et si le réglage l'autorise. */
+  private vibrate(pattern: number | readonly number[]): void {
+    if (!this.touch.touchMode || !this.profile.settings.haptics) return;
+    if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return;
+    try {
+      navigator.vibrate(typeof pattern === 'number' ? pattern : [...pattern]);
+    } catch {
+      // Vibration refusée par le navigateur : sans effet.
+    }
+  }
+
   private goHome(): void {
     this.mode = 'home';
     this.setPaused(true);
@@ -249,6 +289,7 @@ export class Game implements MenuHost {
   /** Écran de menu changé : le HUD se cache, la caméra reprend sa place derrière le skateur hors accueil et personnalisation. */
   private onMenuChange(): void {
     this.hud.setVisible(this.mode === 'play' && !this.menus.isOpen);
+    this.touch.setActive(this.mode === 'play' && !this.menus.isOpen);
     if (this.cameraView() === 'follow') {
       this.updateCameraTarget();
       this.cameraRig.snap(this.cameraTarget);
@@ -264,7 +305,10 @@ export class Game implements MenuHost {
 
   /** Branche le score, les défis et le profil : XP, repères de zone, réglages, apparence. */
   private wireProgress(): void {
-    this.score.events.on('comboBanked', (r) => this.profile.addXp(r.score * PROGRESSION.xpPerPoint));
+    this.score.events.on('comboBanked', (r) => {
+      this.profile.addXp(r.score * PROGRESSION.xpPerPoint);
+      this.vibrate(TOUCH.bankVibratePattern);
+    });
     const ce = this.challenges.events;
     ce.on('complete', (def) => {
       this.profile.addXp(def.rewardXp);
@@ -301,6 +345,7 @@ export class Game implements MenuHost {
     this.audio.setVolume(s.volume, s.muted);
     this.input.flickRecognizer.sensitivity = s.flickSensitivity;
     this.mouse.sensitivity = s.mouseSensitivity;
+    this.touch.configure(s.touchMode, s.touchLayout, s.mouseSensitivity);
   }
 
   private applyAppearance(): void {
@@ -392,6 +437,8 @@ export class Game implements MenuHost {
       landGrabs: sk.lastLanding.grabs.join(','),
       landGrabContact: sk.lastLanding.grabAtContact,
       mode: this.mode,
+      touchMode: this.touch.touchMode,
+      touchEditing: this.touch.isEditing,
       menu: this.menus.current ?? '',
       level: this.profile.level,
       xp: this.profile.xp,
@@ -447,6 +494,7 @@ export class Game implements MenuHost {
   private onLand(info: LandingInfo): void {
     const strength = Math.min(1, info.impactSpeed / (BAIL.maxImpactSpeed * 0.6));
     this.audio.land(strength, info.quality !== 'clean');
+    if (info.quality !== 'bail') this.vibrate(Math.round(TOUCH.landVibrateMinMs + (TOUCH.landVibrateMaxMs - TOUCH.landVibrateMinMs) * strength));
     this.dust.burst(info.position, info.normal, info.impactSpeed * FX.dustPerImpactSpeed, 0.6 + strength);
     this.pendingImpact = Math.max(this.pendingImpact, info.impactSpeed);
     this.landings++;
@@ -459,6 +507,7 @@ export class Game implements MenuHost {
     this.bailBoardPos.copy(this.skaterVisual.object.position);
     this.bailBoardQuat.copy(this.skaterVisual.object.quaternion);
     this.bail.start(info, this.bailPose, this.bailBoardPos, this.bailBoardQuat);
+    this.vibrate(TOUCH.bailVibrateMs);
     this.skater.poseOverride = this.bail;
     this.skaterVisual.teleportSync();
     this.lastBailText = info.cause;
@@ -477,6 +526,7 @@ export class Game implements MenuHost {
 
   private fixedUpdate(dt: number): void {
     const input = this.input.poll();
+    if (this.gamepad.activeThisStep) this.touch.noteOtherInput();
     this.lastFlickX = input.flick.x;
     this.lastFlickY = input.flick.y;
     this.handleGlobalActions(input);
@@ -609,6 +659,7 @@ export class Game implements MenuHost {
     this.hudView.balance = sk.balance;
     this.hud.update(this.hudView);
     this.menus.update(frameDt);
+    this.touch.update(frameDt);
   }
 
   private readonly hudView = { speed: 0, balanceName: null as string | null, balance: 0 };

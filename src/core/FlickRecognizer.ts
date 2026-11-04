@@ -171,7 +171,8 @@ export class FlickRecognizer {
           this.flickTime = 0;
           this.stillTime = 0;
           this.centerTime = 0;
-          this.reached = false;
+          // Flick vif : le stick peut sortir de la charge directement au bord, la sortie est déjà atteinte.
+          this.reached = r >= FLICK.reachRadius && !inSector;
           this.push(x, y);
         }
         break;
@@ -262,7 +263,8 @@ export class FlickRecognizer {
       if (i === 0) continue;
       const px = p[i * 2 - 2]!;
       const py = p[i * 2 - 1]!;
-      if (r < FLICK.sweepMinRadius || Math.hypot(px, py) < FLICK.sweepMinRadius) continue;
+      // Un segment qui coupe le disque central (trait vif entre deux échantillons) ne balaie aucun angle.
+      if (segmentDistance(px, py, x, y) < FLICK.sweepMinRadius) continue;
       sweep += wrapAngle(Math.atan2(y, x) - Math.atan2(py, px));
     }
     // La sortie se place avant la descente finale vers le centre (relâchement progressif d'un stick
@@ -271,8 +273,10 @@ export class FlickRecognizer {
       endIndex--;
     }
     // Rayon minimal entre le départ et la sortie : le relâchement final vers le centre ne compte pas.
+    // Mesuré sur les segments et non sur les seuls échantillons : un flick vif peut ne laisser que deux
+    // points (bas puis haut) ; c'est le segment qui les relie qui coupe le centre.
     let minR = Infinity;
-    for (let i = 1; i <= endIndex; i++) minR = Math.min(minR, Math.hypot(p[i * 2]!, p[i * 2 + 1]!));
+    for (let i = 1; i <= endIndex; i++) minR = Math.min(minR, segmentDistance(p[i * 2 - 2]!, p[i * 2 - 1]!, p[i * 2]!, p[i * 2 + 1]!));
     if (!Number.isFinite(minR)) minR = maxR;
     sweep += wrapAngle(Math.atan2(p[1]!, p[0]!) - f.startAngle);
     f.sweep = sweep;
@@ -303,6 +307,15 @@ export class FlickRecognizer {
     const side: 1 | -1 | 0 = arc ? (sweep >= 0 ? 1 : -1) : 0;
     return { trick, score: best.score, side, fallback, features: { ...f }, candidates };
   }
+}
+
+/** Distance entre le centre du stick et le segment (ax, ay) → (bx, by). */
+function segmentDistance(ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 1e-12 ? Math.min(1, Math.max(0, -(ax * dx + ay * dy) / len2)) : 0;
+  return Math.hypot(ax + dx * t, ay + dy * t);
 }
 
 function gauss(err: number, tolerance: number): number {

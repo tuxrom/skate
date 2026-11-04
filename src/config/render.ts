@@ -117,6 +117,47 @@ export const HUD = {
   menuStickThreshold: 0.6,
 } as const;
 
+/** Boutons tactiles. */
+export type TouchButtonId = 'push' | 'grab' | 'manual' | 'grind' | 'reset' | 'pause';
+
+/** Position (centre, fraction de la zone sûre de l'écran, 0 à 1) et taille relative d'un bouton tactile. */
+export interface TouchButtonLayout {
+  x: number;
+  y: number;
+  size: number;
+}
+
+/** Contrôles tactiles : tailles, disposition par défaut, retour haptique. */
+export const TOUCH = {
+  /** Diamètre d'un bouton à taille 1 sur l'écran de référence (px CSS). */
+  buttonSize: 60,
+  /** Petit côté d'écran de référence (px CSS) : les boutons suivent ce rapport, borné ci-dessous. */
+  referenceShortSide: 400,
+  minScale: 0.8,
+  maxScale: 1.3,
+  /** Bornes de la taille relative réglable d'un bouton. */
+  sizeMin: 0.6,
+  sizeMax: 1.8,
+  /** Disposition par défaut, pensée pour un téléphone en paysage : colonne à droite, hors du pouce gauche. */
+  defaultLayout: {
+    pause: { x: 0.95, y: 0.1, size: 0.75 },
+    reset: { x: 0.84, y: 0.1, size: 0.75 },
+    grind: { x: 0.94, y: 0.38, size: 1 },
+    grab: { x: 0.94, y: 0.62, size: 1 },
+    push: { x: 0.94, y: 0.86, size: 1.1 },
+    manual: { x: 0.8, y: 0.88, size: 1 },
+  } satisfies Record<TouchButtonId, TouchButtonLayout>,
+  /** Vibration à la réception (ms), selon la violence de l'impact. */
+  landVibrateMinMs: 8,
+  landVibrateMaxMs: 30,
+  /** Motif de vibration d'un combo validé (ms : vibre, pause, vibre...). */
+  bankVibratePattern: [20, 40, 35] as readonly number[],
+  /** Vibration d'une chute (ms). */
+  bailVibrateMs: 60,
+  /** Durée d'affichage des indications « Diriger » et « Flicks » au premier lancement (s). */
+  hintTime: 6,
+} as const;
+
 export type GraphicsQuality = 'low' | 'medium' | 'high';
 
 export interface QualityPreset {

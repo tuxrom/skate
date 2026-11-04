@@ -505,8 +505,16 @@ export const INPUT = {
   tuckThreshold: 0.5,
   /** Mémorisation d'une poussée demandée pendant la récupération du pied (ms). */
   pushBufferMs: 200,
-  /** Vitesse de lissage du stick virtuel tactile (1/s). */
+  /** Vitesse de lissage du joystick tactile (1/s). */
   touchStickSmoothing: 18,
+  /** Rayon du joystick tactile (px CSS) : un déplacement du pouce de cette longueur le met en butée. */
+  touchJoystickRadiusPx: 56,
+  /** Au-delà de ce multiple du rayon, la base du joystick suit le pouce. */
+  touchJoystickFollow: 1.35,
+  /** Rayon du stick de flick au glissé tactile (px CSS), avant la sensibilité du glissé. */
+  touchSwipeRadiusPx: 60,
+  /** Joystick tactile poussé vers l'avant au-delà de ce seuil (0 à 1) : poussée, comme le bouton Pousser. */
+  touchPushThreshold: 0.8,
 } as const;
 
 const DEG = Math.PI / 180;
