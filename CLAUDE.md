@@ -226,6 +226,8 @@ src/
 - Pas d'allocation dans les chemins chauds (`fixedUpdate`, `render`) : vecteurs temporaires réutilisés en champs privés.
 - Toute ressource Three.js ou Rapier créée doit pouvoir être libérée (`dispose()`).
 - Commentaires et textes d'interface en français, identifiants de code en anglais.
+- Dans `src/ui/styles.ts`, un bloc `@media` qui adapte un composant se place après les règles de base de ce composant : à spécificité égale, la dernière règle l'emporte, et un `@media` déclaré avant n'a aucun effet.
+- Les menus se vérifient aussi sur téléphone à l'horizontale (320 à 360 px de haut) : le bouton principal doit rester visible sans défiler, et rester le premier dans l'ordre du DOM (focus initial, clavier, manette).
 
 ## Étapes du projet
 

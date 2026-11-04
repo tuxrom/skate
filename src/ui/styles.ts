@@ -81,19 +81,6 @@ const CSS = `
 @media (max-width: 560px) { .hud-session { display: none; } .hud-challenge { width: min(240px, 60vw); } }
 
 /* ---------- Menus ---------- */
-@media (max-height: 420px) {
-  .menu-buttons { display: grid; grid-template-columns: 1fr 1fr; }
-  .menu-buttons .menu-btn.primary { grid-column: 1 / -1; }
-  .menu-panel h2 { margin-bottom: 6px; }
-}
-@media (max-height: 520px) {
-  .menu-panel h1 { font-size: 40px; }
-  .menu-sub { display: none; }
-  .menu-stats { margin-bottom: 10px; gap: 12px; }
-  .menu-stats b { font-size: 15px; }
-  .menu-buttons { gap: 6px; }
-  .menu-btn { min-height: 38px; padding: 8px 14px; font-size: 15px; }
-}
 .menu-layer { position: fixed; inset: 0; z-index: 30; display: none; font-family: var(--ui-font); color: var(--ui-text);
   align-items: center; justify-content: center; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
   max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); box-sizing: border-box; }
@@ -176,6 +163,24 @@ kbd { display: inline-block; font: 700 11px/1 var(--ui-font); padding: 3px 6px; 
 .gesture small { display: block; font-weight: 500; color: var(--ui-dim); margin-top: 2px; }
 .help-list { margin: 4px 0; padding-left: 18px; font: 400 13px/1.5 var(--ui-font); color: var(--ui-dim); }
 .help-list b { color: var(--ui-text); }
+
+/* Écrans bas (téléphone à l'horizontale). Ces règles doivent suivre les règles de base des menus : déclarées
+   avant, à spécificité égale, elles seraient écrasées. */
+@media (max-height: 520px) {
+  .menu-panel h1 { font-size: 40px; }
+  .menu-sub { display: none; }
+  .menu-stats { margin-bottom: 10px; gap: 12px; }
+  .menu-stats b { font-size: 15px; }
+  .menu-buttons { gap: 6px; }
+  .menu-btn { min-height: 38px; padding: 8px 14px; font-size: 15px; }
+}
+@media (max-height: 420px) {
+  /* Indication de bas de l'accueil : reprise dans l'écran Aide, elle cède la place sur les écrans les plus bas. */
+  .menu-layer.home .menu-panel > p { display: none; }
+  .menu-buttons { display: grid; grid-template-columns: 1fr 1fr; }
+  .menu-buttons .menu-btn.primary { grid-column: 1 / -1; }
+  .menu-panel h2 { margin-bottom: 6px; }
+}
 
 /* ---------- Tactile ---------- */
 html, body { overscroll-behavior: none; }
@@ -267,6 +272,24 @@ html.touch-ui .menu-panel { touch-action: pan-y; }
   background: rgba(244, 211, 94, 0.08); font: 500 13px/1.4 var(--ui-font); }
 .install-card b { display: block; font: 800 14px/1.3 var(--ui-font); margin-bottom: 2px; }
 .install-card .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+/* Accueil : la carte d'installation suit les boutons dans le DOM. Sur grand écran, elle est remontée au-dessus des
+   statistiques ; sur écran bas (téléphone à l'horizontale), elle reste après les boutons et tient sur une ligne,
+   pour que « Jouer » soit visible sans défiler. */
+.menu-layer.home .menu-panel { display: flex; flex-direction: column; }
+.menu-layer.home .menu-panel > h1 { order: 1; }
+.menu-layer.home .menu-panel > .menu-sub { order: 2; }
+.menu-layer.home .menu-panel > .install-card { order: 3; }
+.menu-layer.home .menu-panel > .menu-stats { order: 4; }
+.menu-layer.home .menu-panel > .menu-buttons { order: 5; }
+.menu-layer.home .menu-panel > p { order: 7; }
+@media (max-height: 520px) {
+  .menu-layer.home .install-card .desc { display: none; }
+  .menu-layer.home .menu-panel > .install-card { order: 6; margin: 10px 0 0; padding: 6px 10px; display: flex; flex-wrap: wrap; align-items: center;
+    column-gap: 10px; row-gap: 4px; font-size: 12px; }
+  .menu-layer.home .install-card b { display: inline; margin: 0; font-size: 13px; }
+  .menu-layer.home .install-card .actions { margin: 0 0 0 auto; }
+  .menu-layer.home .install-card .menu-btn.small { min-height: 32px; padding: 6px 10px; font-size: 13px; }
+}
 .install-steps { margin: 8px 0 0; padding-left: 20px; font: 500 14px/1.6 var(--ui-font); }
 .install-steps .share { display: inline-block; width: 18px; height: 18px; vertical-align: -3px; border: 2px solid currentColor; border-top: none;
   border-radius: 0 0 4px 4px; position: relative; margin: 0 3px; box-sizing: border-box; }

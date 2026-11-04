@@ -212,7 +212,6 @@ export class Menus {
     const h1 = add(p, 'h1');
     h1.innerHTML = 'Ska<span>te</span>';
     add(p, 'div', 'menu-sub').textContent = 'Flicks au stick, grinds, manuals et combos dans un skatepark ouvert.';
-    this.installCard(p);
     this.stats(p);
     const b = add(p, 'div', 'menu-buttons');
     this.button(b, 'Jouer', () => this.host.play(), 'primary', 'play');
@@ -220,6 +219,9 @@ export class Menus {
     this.button(b, 'Personnaliser', () => this.push('custom'), '', 'custom');
     this.button(b, 'Réglages', () => this.push('settings'), '', 'settings');
     this.button(b, 'Aide et gestes', () => this.push('help'), '', 'help');
+    // Après les boutons dans le DOM : « Jouer » reçoit le focus et passe en premier au clavier et à la manette.
+    // Sur grand écran, l'ordre CSS remonte la carte au-dessus des statistiques.
+    this.installCard(p);
     const pad = PAD_LABELS[this.host.padFamily()];
     add(p, 'p').textContent = this.host.touchMode
       ? 'Pouce gauche : diriger. Pouce droit : flicks au glissé. Bouton ❚❚ : menu en jeu.'
@@ -251,7 +253,7 @@ export class Menus {
     if (state === 'none' || this.host.profile.settings.installDismissed) return;
     const card = add(p, 'div', 'install-card');
     add(card, 'b').textContent = 'Installe Skate';
-    card.append('Une icône sur l’écran d’accueil, le plein écran, et le jeu fonctionne hors ligne.');
+    add(card, 'span', 'desc').textContent = 'Une icône sur l’écran d’accueil, le plein écran, et le jeu fonctionne hors ligne.';
     const actions = add(card, 'div', 'actions');
     this.button(actions, 'Installer', () => this.install(), 'primary small', 'install');
     this.button(
