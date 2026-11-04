@@ -9,8 +9,9 @@ import type { ScoreSystem } from '@/score/ScoreSystem';
 import { CHALLENGES, type ChallengeDef } from '@/world/challenges';
 import { GESTURES, KEYBOARD_BINDINGS, PAD_LABELS, TOUCH_BINDINGS, gestureSvg, padBindings, type Binding } from './helpContent';
 import { fmt } from './Hud';
+import type { InstallState } from '@/platform/InstallPrompt';
 
-export type ScreenId = 'home' | 'pause' | 'settings' | 'custom' | 'objectives' | 'help';
+export type ScreenId = 'home' | 'pause' | 'settings' | 'custom' | 'objectives' | 'help' | 'install';
 
 /** Ce que les menus demandent au jeu. */
 export interface MenuHost {
@@ -33,6 +34,10 @@ export interface MenuHost {
   readonly touchMode: boolean;
   /** Ouvre l'éditeur de disposition des boutons tactiles. */
   editTouchLayout(): void;
+  /** Installation proposée : boîte de dialogue du navigateur, aide iOS, ou rien. */
+  readonly installState: InstallState;
+  /** Ouvre la boîte de dialogue d'installation du navigateur. */
+  installApp(): void;
 }
 
 /** Délai pour confirmer l'effacement de la progression (ms). */
@@ -194,6 +199,8 @@ export class Menus {
         return this.buildObjectives(p);
       case 'help':
         return this.buildHelp(p);
+      case 'install':
+        return this.buildInstall(p);
     }
   }
 
@@ -201,6 +208,7 @@ export class Menus {
     const h1 = add(p, 'h1');
     h1.innerHTML = 'Ska<span>te</span>';
     add(p, 'div', 'menu-sub').textContent = 'Flicks au stick, grinds, manuals et combos dans un skatepark ouvert.';
+    this.installCard(p);
     this.stats(p);
     const b = add(p, 'div', 'menu-buttons');
     this.button(b, 'Jouer', () => this.host.play(), 'primary', 'play');
@@ -225,6 +233,57 @@ export class Menus {
     this.button(b, 'Réglages', () => this.push('settings'), '', 'settings');
     this.button(b, 'Aide et gestes', () => this.push('help'), '', 'help');
     this.button(b, 'Menu principal', () => this.host.quitToHome(), 'danger', 'quit');
+  }
+
+  /** Invite d'installation de l'accueil, tant qu'elle n'a pas été refusée. */
+  private installCard(p: HTMLElement): void {
+    const state = this.host.installState;
+    if (state === 'none' || this.host.profile.settings.installDismissed) return;
+    const card = add(p, 'div', 'install-card');
+    add(card, 'b').textContent = 'Installe Skate';
+    card.append('Une icône sur l’écran d’accueil, le plein écran, et le jeu fonctionne hors ligne.');
+    const actions = add(card, 'div', 'actions');
+    this.button(actions, 'Installer', () => this.install(), 'primary small', 'install');
+    this.button(
+      actions,
+      'Plus tard',
+      () => {
+        this.host.click();
+        this.host.profile.updateSettings({ installDismissed: true });
+        this.refresh();
+      },
+      'small',
+      'installLater',
+    );
+  }
+
+  private install(): void {
+    if (this.host.installState === 'ios') this.push('install');
+    else {
+      this.host.click();
+      this.host.installApp();
+    }
+  }
+
+  /** Installation manuelle sur iPhone et iPad (Safari ne propose pas de boîte de dialogue). */
+  private buildInstall(p: HTMLElement): void {
+    this.header(p, 'Installer sur iPhone ou iPad');
+    add(p, 'p').textContent = 'Dans Safari :';
+    const ol = add(p, 'ol', 'install-steps');
+    const step1 = add(ol, 'li');
+    step1.append('Touche ');
+    add(step1, 'span', 'share').setAttribute('aria-label', 'Partager');
+    add(step1, 'b').textContent = 'Partager';
+    step1.append(' dans la barre de Safari.');
+    const step2 = add(ol, 'li');
+    step2.append('Choisis ');
+    add(step2, 'b').textContent = 'Sur l’écran d’accueil';
+    step2.append(' (fais défiler la liste si besoin).');
+    const step3 = add(ol, 'li');
+    step3.append('Touche ');
+    add(step3, 'b').textContent = 'Ajouter';
+    step3.append('.');
+    add(p, 'p').textContent = 'Skate s’ouvre ensuite depuis son icône, en plein écran, et fonctionne hors ligne.';
   }
 
   private stats(p: HTMLElement): void {
@@ -308,6 +367,10 @@ export class Menus {
     bindingsTable(p, padBindings(PAD_LABELS[this.host.padFamily()]));
     add(p, 'h3').textContent = 'Tactile';
     bindingsTable(p, TOUCH_BINDINGS);
+
+    add(p, 'h3').textContent = 'Application';
+    this.toggle(row(p, 'Plein écran en jeu (mobile)'), 'fullscreen', s.fullscreen, (v) => prof.updateSettings({ fullscreen: v }));
+    if (this.host.installState !== 'none') this.button(p, 'Installer l’application', () => this.install(), 'small', 'installSettings');
 
     add(p, 'h3').textContent = 'Données';
     add(p, 'p').textContent = `Sauvegarde : ${backendLabel(prof.backend)}.`;

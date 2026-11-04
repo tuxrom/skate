@@ -41,7 +41,7 @@ export interface ChallengeDef {
 }
 
 export const ZONES: readonly ZoneDef[] = [
-  { id: 'start', name: 'Départ', x: 0, z: 12, radius: 6 },
+  { id: 'start', name: 'Départ', x: 0, z: 12, radius: 9 },
   { id: 'manualBox', name: 'Boîte de manual', x: 12, z: 12, radius: 4.5 },
   { id: 'rails', name: 'Les rails', x: 11.5, z: 26, radius: 9.5 },
   { id: 'gap', name: 'Le gap', x: -20, z: 11, radius: 6 },

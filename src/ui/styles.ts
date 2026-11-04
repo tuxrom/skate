@@ -225,6 +225,31 @@ html.touch-ui .hud-top { width: min(54vw, 460px); }
 html.touch-ui .hud-toasts { bottom: max(54px, calc(env(safe-area-inset-bottom) + 46px)); width: min(50vw, 420px); }
 html.touch-ui .toast { font-size: 12px; padding: 6px 12px; }
 html.touch-ui .menu-panel { touch-action: pan-y; }
+/* ---------- Plateforme ---------- */
+.rotate-overlay { position: fixed; inset: 0; z-index: 60; display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; background: #14161a; color: var(--ui-text); font: 500 15px/1.4 var(--ui-font); text-align: center;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.rotate-overlay.on { display: flex; }
+.rotate-overlay b { font: 800 22px/1.2 var(--ui-font); }
+.rotate-overlay span { color: var(--ui-dim); }
+.rotate-overlay .phone { width: 46px; height: 80px; border: 4px solid var(--ui-accent); border-radius: 10px; margin-bottom: 14px;
+  animation: rotate-hint 2.2s ease-in-out infinite; }
+@keyframes rotate-hint { 0%, 25% { transform: rotate(0); } 55%, 85% { transform: rotate(-90deg); } 100% { transform: rotate(0); } }
+.pwa-banner { position: fixed; z-index: 45; left: 50%; top: max(10px, env(safe-area-inset-top)); transform: translate(-50%, -140%);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center; max-width: calc(100vw - 24px); box-sizing: border-box;
+  background: var(--ui-bg); border: 1px solid var(--ui-line); border-radius: 12px; padding: 8px 12px; color: var(--ui-text);
+  font: 600 14px/1.3 var(--ui-font); box-shadow: 0 8px 24px rgba(0,0,0,0.4); transition: transform 0.25s ease-out; }
+.pwa-banner.on { transform: translate(-50%, 0); }
+.pwa-banner .actions { display: flex; gap: 6px; }
+.pwa-banner .actions:empty { display: none; }
+.install-card { margin: 0 0 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(244, 211, 94, 0.5);
+  background: rgba(244, 211, 94, 0.08); font: 500 13px/1.4 var(--ui-font); }
+.install-card b { display: block; font: 800 14px/1.3 var(--ui-font); margin-bottom: 2px; }
+.install-card .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.install-steps { margin: 8px 0 0; padding-left: 20px; font: 500 14px/1.6 var(--ui-font); }
+.install-steps .share { display: inline-block; width: 18px; height: 18px; vertical-align: -3px; border: 2px solid currentColor; border-top: none;
+  border-radius: 0 0 4px 4px; position: relative; margin: 0 3px; box-sizing: border-box; }
+.install-steps .share::before { content: '↑'; position: absolute; left: 50%; top: -9px; transform: translateX(-50%); font: 800 13px/1 var(--ui-font); }
 `;
 
 let installed = false;

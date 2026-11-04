@@ -19,6 +19,7 @@ Jeu de skateboard 3D en vue troisième personne, inspiré de la série Skate d'E
 | `npm run typecheck` | Vérification TypeScript seule |
 | `npm run build` | `tsc --noEmit` puis build de production dans `dist/` (service worker inclus) |
 | `npm run preview` | Sert `dist/` localement, avec le service worker actif |
+| `npm run icons` | Régénère les icônes PWA (PNG 64, 192, 512, maskable, Apple, favicon) depuis `public/icon.svg` (`pwa-assets.config.ts`) |
 
 En production, ajouter `?debug` à l'URL pour afficher le panneau de debug. `F3` ou `²`/`` ` `` le bascule à tout moment.
 
@@ -85,8 +86,9 @@ Un trait coupe le disque intérieur du stick, un arc reste sur le bord : c'est l
 
 ```
 index.html              point d'entrée HTML, styles plein écran
-vite.config.ts          alias @ -> src, configuration PWA
-public/icon.svg         icône de l'application
+vite.config.ts          alias @ -> src, configuration PWA (manifeste, précache, cache des autres requêtes)
+pwa-assets.config.ts    génération des icônes PWA (npm run icons)
+public/                 icon.svg (source) et icônes générées : pwa-*.png, maskable-icon-512x512.png, apple-touch-icon, favicon
 src/
   main.ts               démarrage : charge Rapier et les assets, crée Game, enregistre le SW
   config/
@@ -109,6 +111,11 @@ src/
     Profile.ts          profil en mémoire : niveau et XP, défis, records, réglages, personnalisation, écriture différée
     ChallengeSystem.ts  objectifs de zone : présence dans les zones, progression, chronos, réussite
     unlocks.ts          catalogue des boards et couleurs, conditions de déblocage, apparence du skateur
+  platform/
+    device.ts           détection : écran tactile, iOS, application installée
+    InstallPrompt.ts    invite d'installation (beforeinstallprompt retenu, aide iOS)
+    DisplayMode.ts      plein écran, verrouillage en paysage, écran de rotation, menu contextuel bloqué
+    PwaUpdates.ts       service worker, bandeaux « Prêt hors ligne » et « Nouvelle version »
   save/
     SaveStore.ts        stockage IndexedDB avec repli localStorage, reprise des anciens records
     SaveData.ts         format de sauvegarde, valeurs par défaut, validation, niveau selon l'XP
@@ -191,6 +198,9 @@ src/
 - **Progression** : XP = points des combos validés × `PROGRESSION.xpPerPoint` + récompenses des défis ; niveau par paliers croissants (`levelBaseXp`, `levelGrowth`). Boards et couleurs se débloquent par niveau, certains boards par un défi (`unlocks.ts`).
 - **Défis de zone** (`ChallengeSystem`) : zones circulaires (`world/challenges.ts`), suivies par masque de bits à chaque pas. Types : combo validé avec un élément dans la zone, grind ou manual d'une longueur ou durée, saut d'une famille (flip, rotation...), chrono lancé en entrant dans la zone (points ou nombre d'éléments). Progression maximale gardée, réussite unique.
 - **Qualité graphique** (`QUALITY_PRESETS`) : bas, moyen, haut ; appliquée à chaud par `Renderer.setQuality` (pixel ratio, ombres, recompilation des matériaux) et `Level.setQuality` (brouillard, shadow map). La distance de rendu de la caméra suit le brouillard. L'antialiasing reste celui du démarrage. Par défaut : moyen sur écran tactile, haut sinon.
+- **PWA** (`vite.config.ts`, `registerType: 'prompt'`) : manifeste complet (`display: standalone` avec `display_override` plein écran, paysage, `start_url` et `scope` à `/`, icônes 192 et 512 dont une maskable). Le service worker précache tout le build ; le WASM de Rapier est intégré en base64 au bundle JS (`rapier3d-compat`) et part donc avec lui, d'où `maximumFileSizeToCacheInBytes` relevé. Navigations hors ligne servies par `index.html`, autres requêtes de même origine en stale-while-revalidate (`skate-runtime`). `clientsClaim` : le premier service worker prend la page ouverte ; une nouvelle version attend l'accord du joueur (bandeau, `PwaUpdates`), qui recharge aussi au changement de contrôleur quand workbox-window ne le fait pas (première visite).
+- **Plateforme** : `InstallPrompt` est créé dans `main.ts` avant tout `await` pour ne pas manquer `beforeinstallprompt` ; carte d'installation sur l'accueil (« Plus tard » mémorisé dans les réglages), écran d'aide iOS. `DisplayMode.enterGame` (appelé dans le clic de « Jouer » ou « Reprendre », geste du joueur oblige) demande le plein écran si le réglage l'autorise et en interface tactile, puis `screen.orientation.lock('landscape')` ; en portrait sur interface tactile, l'écran de rotation recouvre tout et met la partie en pause. Zoom, pull-to-refresh, défilement élastique, sélection et menu contextuel sont neutralisés (`index.html`, `DisplayMode`, `TouchControls`).
+- **Vérification PWA** : Lighthouse a retiré sa catégorie PWA à partir de la v12 ; l'audit se fait avec `lighthouse@11` (`--only-categories=pwa`) sur `npm run preview`. Le hors ligne se vérifie à part (navigateur hors ligne après installation du service worker, rechargement, partie lancée).
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
 ## Conventions de code
@@ -218,7 +228,7 @@ src/
 - [x] 7. Score et combos : valeur de base par trick, combos prolongés par grinds et manuals, délai au sol configurable, multiplicateur par éléments distincts, bonus de variété, de hauteur, de distance et de transition grind ↔ manual, pénalité de répétition, validation sur réception propre, annulation totale sur chute, bus d'événements typé, meilleur score de session et records en localStorage
 - [x] 8. HUD, menus, sauvegarde : HUD (combo, nom du trick, validation et annulation animées, jauge, vitesse, niveau, objectifs, notifications), écran de chargement, menus responsive (accueil, pause, réglages, personnalisation, objectifs, aide illustrée), qualité graphique réelle, défis de zone, niveau et déblocages, sauvegarde IndexedDB avec repli localStorage, manette Xbox / PlayStation dans le jeu et les menus
 - [x] 9. Contrôles tactiles : joystick flottant, swipe des flicks par le même code que la souris, boutons déplaçables et redimensionnables, multitouch, touchcancel, gestes du navigateur neutralisés, retour haptique, bascule automatique HUD PC / mobile, safe areas ; reconnaissance des flicks vifs (rayon minimal mesuré sur les segments)
-- [ ] 10. PWA (icônes PNG, écran d'installation, stratégie de cache, mode hors ligne vérifié)
+- [x] 10. PWA : manifeste complet et icônes PNG (dont maskable), précache de tout le build (WASM compris) et stale-while-revalidate pour le reste, mise à jour sur accord du joueur, hors ligne vérifié, invite d'installation et aide iOS, plein écran et verrouillage en paysage, écran de rotation ; Lighthouse 11 PWA : 100
 - [ ] 11. Optimisation (découpage du bundle, le WASM inline de Rapier pèse lourd ; profilage mobile)
 
 ## Règle de fin d'étape

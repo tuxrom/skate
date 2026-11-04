@@ -2,6 +2,7 @@ import { PROGRESSION, SETTINGS_LIMITS } from '@/config/physics';
 import { TOUCH, type GraphicsQuality, type TouchButtonId, type TouchButtonLayout } from '@/config/render';
 import type { ScoreRecords } from '@/score/ScoreSystem';
 import { BOARDS, COLORS, DEFAULT_CUSTOMIZATION, type Customization } from '@/progress/unlocks';
+import { detectTouchDevice } from '@/platform/device';
 
 export type PadLayout = 'auto' | 'xbox' | 'playstation';
 /** Contrôles tactiles : détectés automatiquement, toujours affichés, ou jamais. */
@@ -32,6 +33,10 @@ export interface Settings {
   haptics: boolean;
   /** Position et taille des boutons tactiles. */
   touchLayout: Record<TouchButtonId, TouchButtonLayout>;
+  /** Plein écran (et verrouillage en paysage si possible) en lançant une partie. */
+  fullscreen: boolean;
+  /** Invite d'installation refusée (« Plus tard ») : elle ne s'affiche plus sur l'accueil. */
+  installDismissed: boolean;
 }
 
 export interface ChallengeProgress {
@@ -70,6 +75,8 @@ export function defaultSettings(): Settings {
     touchMode: 'auto',
     haptics: true,
     touchLayout: defaultTouchLayout(),
+    fullscreen: detectTouchDevice(),
+    installDismissed: false,
   };
 }
 
@@ -114,6 +121,8 @@ export function sanitizeSave(raw: unknown): SaveData {
     if (s.padLayout === 'xbox' || s.padLayout === 'playstation' || s.padLayout === 'auto') d.padLayout = s.padLayout;
     if (s.touchMode === 'auto' || s.touchMode === 'on' || s.touchMode === 'off') d.touchMode = s.touchMode;
     if (typeof s.haptics === 'boolean') d.haptics = s.haptics;
+    if (typeof s.fullscreen === 'boolean') d.fullscreen = s.fullscreen;
+    if (typeof s.installDismissed === 'boolean') d.installDismissed = s.installDismissed;
     if (isObject(s.touchLayout)) {
       for (const id of TOUCH_BUTTON_IDS) {
         const b = s.touchLayout[id];

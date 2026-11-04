@@ -2,6 +2,7 @@ import { FIXED_DT, INPUT } from '@/config/physics';
 import { TOUCH, type TouchButtonId, type TouchButtonLayout } from '@/config/render';
 import { DragStick, type ButtonAction, type InputSource, type MutableSnapshot } from '@/core/Input';
 import { TOUCH_BUTTON_IDS, defaultTouchLayout, type TouchMode } from '@/save/SaveData';
+import { detectTouchDevice } from '@/platform/device';
 
 /** Libellés courts des boutons. */
 const LABELS: Readonly<Record<TouchButtonId, string>> = {
@@ -500,12 +501,6 @@ export class TouchControls implements InputSource {
     this.layer.remove();
     this.probe.remove();
   }
-}
-
-/** Écran tactile sans souris : téléphone ou tablette. */
-export function detectTouchDevice(): boolean {
-  if (typeof matchMedia !== 'function') return false;
-  return matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
 }
 
 function div(className: string, parent: HTMLElement): HTMLDivElement {

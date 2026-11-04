@@ -29,6 +29,8 @@ import { Hud } from '@/ui/Hud';
 import { Menus, type MenuHost } from '@/ui/Menus';
 import { installStyles } from '@/ui/styles';
 import { TouchControls } from '@/ui/TouchControls';
+import { DisplayMode } from '@/platform/DisplayMode';
+import type { InstallPrompt, InstallState } from '@/platform/InstallPrompt';
 import { PAD_LABELS } from '@/ui/helpContent';
 
 /** Vitesse au-dessus de laquelle le sens de marche oriente la caméra (m/s). */
@@ -43,6 +45,8 @@ export interface GameOptions {
   debug: boolean;
   /** Profil chargé (sauvegarde) : records, niveau, défis, réglages, personnalisation. */
   profile: Profile;
+  /** Invite d'installation, créée au démarrage pour ne pas manquer beforeinstallprompt. */
+  install: InstallPrompt;
 }
 
 /** Accueil (menu, caméra en orbite, simulation figée) ou partie en cours. */
@@ -84,6 +88,8 @@ export class Game implements MenuHost {
   private readonly gamepad = new GamepadSource();
   private readonly mouse: MouseFlickSource;
   readonly touch: TouchControls;
+  readonly display: DisplayMode;
+  private readonly install: InstallPrompt;
   mode: GameMode = 'home';
   private orbitAngle = 0;
   private readonly camLook = new THREE.Vector3();
@@ -182,6 +188,13 @@ export class Game implements MenuHost {
     this.menus = new Menus(opts.container, this);
     this.menus.onChange = () => this.onMenuChange();
     this.touch.onModeChange = (on) => this.onTouchMode(on);
+    this.display = new DisplayMode(opts.container);
+    // Appareil tourné en portrait en pleine partie : pause, l'écran de rotation recouvre tout.
+    this.display.onRotateChange = (blocked) => {
+      if (blocked && this.mode === 'play' && !this.menus.isOpen) this.openPause();
+    };
+    this.install = opts.install;
+    this.install.onChange = () => this.menus.refresh();
     this.wireProgress();
     this.loop = new GameLoop(
       {
@@ -206,6 +219,8 @@ export class Game implements MenuHost {
   // Modes et menus (MenuHost).
 
   play(): void {
+    // Dans le gestionnaire du clic : le plein écran exige un geste du joueur.
+    void this.display.enterGame(this.profile.settings.fullscreen);
     this.mode = 'play';
     this.menus.close();
     this.setPaused(false);
@@ -214,6 +229,7 @@ export class Game implements MenuHost {
 
   resume(): void {
     if (this.mode !== 'play') return;
+    void this.display.enterGame(this.profile.settings.fullscreen);
     this.menus.close();
     this.setPaused(false);
     this.input.suppressHeld();
@@ -241,6 +257,14 @@ export class Game implements MenuHost {
     this.audio.uiClick();
   }
 
+  get installState(): InstallState {
+    return this.install.state;
+  }
+
+  installApp(): void {
+    void this.install.prompt();
+  }
+
   get touchMode(): boolean {
     return this.touch.touchMode;
   }
@@ -260,6 +284,7 @@ export class Game implements MenuHost {
   /** Bascule entre l'interface PC et l'interface tactile. */
   private onTouchMode(on: boolean): void {
     document.documentElement.classList.toggle('touch-ui', on);
+    this.display.setTouchUi(on);
     this.hud.refreshHints();
     this.menus.refresh();
   }
@@ -439,6 +464,9 @@ export class Game implements MenuHost {
       mode: this.mode,
       touchMode: this.touch.touchMode,
       touchEditing: this.touch.isEditing,
+      installState: this.install.state,
+      fullscreen: this.display.isFullscreen,
+      rotateBlocked: this.display.rotateBlocked,
       menu: this.menus.current ?? '',
       level: this.profile.level,
       xp: this.profile.xp,

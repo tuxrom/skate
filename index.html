@@ -4,11 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#14161a" />
-    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <meta name="description" content="Jeu de skateboard 3D : flicks au stick, grinds, manuals et combos, jouable hors ligne." />
+    <meta name="color-scheme" content="dark" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Skate" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="format-detection" content="telephone=no" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" href="/icon.svg" sizes="any" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
     <title>Skate</title>
     <style>
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #14161a; }
-      body { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+      /* Ni zoom, ni pull-to-refresh, ni défilement élastique, ni sélection ou appui long. */
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #14161a; overscroll-behavior: none; }
+      html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+      body { position: fixed; inset: 0; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent; }
       #app { position: fixed; inset: 0; }
       #app canvas { display: block; width: 100%; height: 100%; }
       #loading { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center;
