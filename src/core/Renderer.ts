@@ -6,6 +6,10 @@ export class Renderer {
   readonly three: THREE.WebGLRenderer;
   private readonly resizeObserver: ResizeObserver;
   private readonly listeners = new Set<(w: number, h: number) => void>();
+  /** Contexte WebGL perdu (pilote réinitialisé, mémoire graphique saturée) puis restauré. */
+  onContextLost: () => void = () => {};
+  onContextRestored: () => void = () => {};
+  contextLost = false;
   /** Plafond du pixel ratio et échelle de résolution, réglés par la qualité graphique. */
   private maxPixelRatio: number = RENDER.maxPixelRatio;
   private resolutionScale = 1;
@@ -21,6 +25,8 @@ export class Renderer {
     this.three.shadowMap.enabled = true;
     this.three.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.three.domElement);
+    this.three.domElement.addEventListener('webglcontextlost', this.handleLost);
+    this.three.domElement.addEventListener('webglcontextrestored', this.handleRestored);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -71,7 +77,21 @@ export class Renderer {
     for (const l of this.listeners) l(w, h);
   }
 
+  private readonly handleLost = (e: Event): void => {
+    // Sans preventDefault, le navigateur ne restaure jamais le contexte.
+    e.preventDefault();
+    this.contextLost = true;
+    this.onContextLost();
+  };
+
+  private readonly handleRestored = (): void => {
+    this.contextLost = false;
+    this.onContextRestored();
+  };
+
   dispose(): void {
+    this.three.domElement.removeEventListener('webglcontextlost', this.handleLost);
+    this.three.domElement.removeEventListener('webglcontextrestored', this.handleRestored);
     this.resizeObserver.disconnect();
     this.three.dispose();
   }

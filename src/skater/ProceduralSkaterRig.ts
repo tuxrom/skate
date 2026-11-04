@@ -239,6 +239,8 @@ export class ProceduralSkaterRig implements SkaterRig {
     this.backShin = this.addLimb(limbGeo, m.pants, this.rider);
     this.frontKnee = this.addMesh(jointGeo, m.pants, this.rider);
     this.backKnee = this.addMesh(jointGeo, m.pants, this.rider);
+    // Rotules cachées dans l'ombre des jambes : pas de draw call de plus dans la passe d'ombre.
+    this.frontKnee.castShadow = this.backKnee.castShadow = false;
     this.frontShoe = this.addMesh(shoeGeo, m.shoe, this.rider);
     this.backShoe = this.addMesh(shoeGeo, m.shoe, this.rider);
     for (const [thigh, shin, knee, shoe] of [
@@ -293,12 +295,16 @@ export class ProceduralSkaterRig implements SkaterRig {
     for (const sign of [-1, 1]) {
       const z = sign * (BODY.wheelbase / 2);
       const base = this.addMesh(baseGeo, m.metal, this.board);
+      base.castShadow = false;
       base.position.set(0, DECK_BOTTOM - (TRUCK_HEIGHT - 0.008) / 2, z);
       const hanger = this.addMesh(hangerGeo, m.metal, this.board);
+      hanger.castShadow = false;
       hanger.position.set(0, WHEEL_RADIUS + 0.004, z);
       for (const side of [-1, 1]) {
         const wheel = this.addMesh(wheelGeo, m.wheel, this.board);
         wheel.position.set(side * WHEEL_TRACK, WHEEL_RADIUS, z);
+        // Roues et trucks : trop petits pour une ombre visible, l'ombre du deck les couvre.
+        wheel.castShadow = false;
         this.wheels.push(wheel);
       }
     }

@@ -16,7 +16,7 @@ import { SkaterVisual } from '@/skater/SkaterVisual';
 import { AudioEngine } from '@/audio/AudioEngine';
 import { DebugOverlay } from '@/ui/DebugOverlay';
 import { DEBUG, FX, HUD, QUALITY_PRESETS, TOUCH } from '@/config/render';
-import { BAIL, PROGRESSION, WORLD } from '@/config/physics';
+import { BAIL, BODY, FIXED_DT, PROGRESSION, SAFETY, WORLD } from '@/config/physics';
 import { DustEffect } from '@/world/DustEffect';
 import { ScoreSystem } from '@/score/ScoreSystem';
 import type { Profile } from '@/progress/Profile';
@@ -28,6 +28,9 @@ import type { Settings } from '@/save/SaveData';
 import { Hud } from '@/ui/Hud';
 import { Menus, type MenuHost } from '@/ui/Menus';
 import { installStyles } from '@/ui/styles';
+import { hideErrorScreen, showErrorScreen } from '@/ui/ErrorScreen';
+import { ReplayRecorder, createFrame } from '@/replay/ReplayRecorder';
+import { ReplayView } from '@/ui/ReplayView';
 import { TouchControls } from '@/ui/TouchControls';
 import { DisplayMode } from '@/platform/DisplayMode';
 import type { InstallPrompt, InstallState } from '@/platform/InstallPrompt';
@@ -89,6 +92,14 @@ export class Game implements MenuHost {
   private readonly mouse: MouseFlickSource;
   readonly touch: TouchControls;
   readonly display: DisplayMode;
+  /** Replay : enregistrement continu des dernières secondes, et lecteur. */
+  readonly replay = new ReplayRecorder();
+  private readonly replayView: ReplayView;
+  private readonly replayFrame = createFrame();
+  replayActive = false;
+  private recordTick = 0;
+  private readonly recPos = new THREE.Vector3();
+  private readonly recQuat = new THREE.Quaternion();
   private readonly install: InstallPrompt;
   mode: GameMode = 'home';
   private orbitAngle = 0;
@@ -194,12 +205,28 @@ export class Game implements MenuHost {
       if (blocked && this.mode === 'play' && !this.menus.isOpen) this.openPause();
     };
     this.install = opts.install;
+    this.replayView = new ReplayView(opts.container);
+    this.replayView.onExit = () => this.stopReplay();
     this.install.onChange = () => this.menus.refresh();
     this.wireProgress();
+    this.renderer.onContextLost = () => {
+      if (this.mode === 'play' && !this.menus.isOpen) this.openPause();
+      showErrorScreen({
+        title: 'Affichage interrompu',
+        message: 'Le navigateur a perdu le contexte graphique (pilote réinitialisé ou mémoire graphique saturée). Restauration en cours…',
+        action: { label: 'Recharger', run: () => location.reload() },
+      });
+    };
+    this.renderer.onContextRestored = () => {
+      hideErrorScreen();
+      // Three.js recrée programmes et tampons ; les ombres de la scène se recompilent avec.
+      this.applySettings(this.profile.settings);
+    };
     this.loop = new GameLoop(
       {
         fixedUpdate: (dt) => this.fixedUpdate(dt),
         render: (alpha, frameDt) => this.render(alpha, frameDt),
+        onError: (e) => this.onFatalError(e),
       },
       DEBUG.statsRefresh,
     );
@@ -212,6 +239,7 @@ export class Game implements MenuHost {
     this.applyAppearance();
     this.refreshMarkers();
     document.addEventListener('visibilitychange', this.onVisibility);
+    window.addEventListener('blur', this.onBlur);
     this.goHome();
   }
 
@@ -255,6 +283,33 @@ export class Game implements MenuHost {
 
   click(): void {
     this.audio.uiClick();
+  }
+
+  get replayDuration(): number {
+    return this.replay.duration;
+  }
+
+  /** Replay des dernières secondes : simulation figée, menus masqués, lecture avec caméra de jeu ou libre. */
+  startReplay(): void {
+    if (this.replay.duration < 0.5) return;
+    this.replayActive = true;
+    this.menus.setHidden(true);
+    this.dust.object.visible = false;
+    // La caméra libre part de derrière le skateur, dans l'axe de la caméra de jeu.
+    const cam = this.cameraRig.camera.position;
+    const sk = this.skaterVisual.object.position;
+    this.replayView.open(this.replay.duration, Math.atan2(cam.x - sk.x, cam.z - sk.z));
+  }
+
+  stopReplay(): void {
+    if (!this.replayActive) return;
+    this.replayActive = false;
+    this.replayView.close();
+    this.dust.object.visible = true;
+    this.menus.setHidden(false);
+    // Le rendu normal reprend la pose simulée ; la caméra revient derrière le skateur.
+    this.updateCameraTarget();
+    this.cameraRig.snap(this.cameraTarget);
   }
 
   get installState(): InstallState {
@@ -367,6 +422,7 @@ export class Game implements MenuHost {
     cam.far = q.fogFar + 10;
     cam.updateProjectionMatrix();
     this.dust.setViewportHeight(this.renderer.canvas.height);
+    this.dust.setDensity(q.particleDensity);
     this.audio.setVolume(s.volume, s.muted);
     this.input.flickRecognizer.sensitivity = s.flickSensitivity;
     this.mouse.sensitivity = s.mouseSensitivity;
@@ -467,6 +523,8 @@ export class Game implements MenuHost {
       installState: this.install.state,
       fullscreen: this.display.isFullscreen,
       rotateBlocked: this.display.rotateBlocked,
+      relocations: this.relocations,
+      lastRelocation: this.lastRelocation,
       menu: this.menus.current ?? '',
       level: this.profile.level,
       xp: this.profile.xp,
@@ -481,6 +539,10 @@ export class Game implements MenuHost {
       challengesDone: this.profile.completedChallenges().size,
       timed: this.challenges.timed ? `${this.challenges.timed.def.id} ${this.challenges.timed.timeLeft.toFixed(1)}` : '',
       zones: this.challenges.zoneMask,
+      replayActive: this.replayActive,
+      replayDuration: this.replay.duration,
+      replayTime: this.replayView.time,
+      replayCamera: this.replayView.camera,
       comboActive: this.score.combo.active,
       comboElements: this.score.combo.elements.length,
       comboLive: this.score.combo.live?.label ?? '',
@@ -506,6 +568,15 @@ export class Game implements MenuHost {
       fov: cam.fov,
       paused: this.paused,
       fps: this.loop.stats.fps,
+      fixedMs: this.loop.stats.fixedMs,
+      renderMs: this.loop.stats.renderMs,
+      drawCalls: this.renderer.three.info.render.calls,
+      triangles: this.renderer.three.info.render.triangles,
+      geometries: this.renderer.three.info.memory.geometries,
+      textures: this.renderer.three.info.memory.textures,
+      programs: this.renderer.three.info.programs?.length ?? 0,
+      meshes: this.countMeshes().meshes,
+      shadowCasters: this.countMeshes().casters,
     };
   }
 
@@ -562,7 +633,12 @@ export class Game implements MenuHost {
     this.challenges.fixedUpdate(dt);
 
     this.skater.step(dt, input);
-    this.physics.step();
+    // Rapier n'a de travail que s'il y a des corps dynamiques (ragdoll, planche lâchée) : le skateur est
+    // cinématique et ses requêtes lisent directement les colliders statiques, indexés au démarrage.
+    // Un pas de plus après le retrait des derniers corps : Rapier purge alors son index.
+    const bodies = this.physics.world.bodies.len();
+    if (bodies > 0 || this.physicsHadBodies) this.physics.step();
+    this.physicsHadBodies = bodies > 0;
     if (this.bail.phase !== 'none') {
       const wasRagdoll = this.bail.phase === 'ragdoll';
       this.bail.fixedStep(dt, (strength, board) => (board ? this.audio.boardClatter(strength) : this.audio.bodyImpact(strength)));
@@ -574,11 +650,12 @@ export class Game implements MenuHost {
       }
     }
     const sk = this.skater;
+    this.checkSafety(dt);
     // Au sol au sens du combo : roues sur le sol, ni grind, ni manual, ni chute.
     const onGround = sk.grounded && !sk.grinding && !sk.isManual() && !sk.bailing;
     this.score.fixedUpdate(dt, onGround, sk.speed);
     this.skaterVisual.capture();
-    if (sk.position.y < WORLD.killPlaneY) this.respawn();
+    this.recordReplay();
   }
 
   private handleGlobalActions(input: InputSnapshot): void {
@@ -587,8 +664,9 @@ export class Game implements MenuHost {
       this.flickPanel.setVisible(this.debug.isVisible);
     }
     if (input.pressed.has('pause')) {
-      // Échap ou Start : ouvre la pause, ou remonte d'un écran dans les menus.
-      if (this.menus.isOpen) this.menus.back();
+      // Échap ou Start : quitte le replay, ouvre la pause, ou remonte d'un écran dans les menus.
+      if (this.replayActive) this.stopReplay();
+      else if (this.menus.isOpen) this.menus.back();
       else this.openPause();
     }
     if (input.pressed.has('reset') && !this.menus.isOpen) {
@@ -641,6 +719,10 @@ export class Game implements MenuHost {
   }
 
   private render(alpha: number, frameDt: number): void {
+    if (this.replayActive) {
+      this.renderReplay(frameDt);
+      return;
+    }
     // En pause, on fige sur le dernier état simulé pour ne pas osciller entre deux poses.
     const a = this.paused ? 1 : alpha;
     const dt = this.paused ? 0 : frameDt;
@@ -690,6 +772,139 @@ export class Game implements MenuHost {
     this.touch.update(frameDt);
   }
 
+  /** Meshes de la scène et ceux qui projettent une ombre (debug, profilage). */
+  private countMeshes(): { meshes: number; casters: number } {
+    let meshes = 0;
+    let casters = 0;
+    this.scene.traverseVisible((o) => {
+      if (!(o as THREE.Mesh).isMesh) return;
+      meshes++;
+      if (o.castShadow) casters++;
+    });
+    return { meshes, casters };
+  }
+
+  private physicsHadBodies = false;
+
+  /** Enregistre l'état affiché, un pas fixe sur deux (REPLAY.sampleHz). */
+  private recordReplay(): void {
+    if (++this.recordTick < Math.round(1 / (FIXED_DT * this.replay.hz))) return;
+    this.recordTick = 0;
+    this.skater.readPose(this.recPos, this.recQuat);
+    const cam = this.cameraRig.camera;
+    this.replay.record(this.recPos, this.recQuat, this.skaterVisual.currentPose, this.bail.renderJoints(1), cam.position, cam.quaternion);
+  }
+
+  /** Rendu du replay : pose enregistrée appliquée au rig, caméra de jeu enregistrée ou caméra libre. */
+  private renderReplay(frameDt: number): void {
+    const v = this.replayView;
+    v.update(frameDt);
+    const f = this.replayFrame;
+    this.replay.sample(v.time, f);
+    const rig = this.skaterVisual.rig;
+    rig.root.position.copy(f.position);
+    rig.root.quaternion.copy(f.quaternion);
+    rig.applyRagdoll(f.weight > 0.001 ? f.joints : null, f.weight);
+    rig.update(f.pose, v.playing ? frameDt * v.speed : 0);
+    const cam = this.cameraRig.camera;
+    if (v.camera === 'game') {
+      cam.position.copy(f.cameraPosition);
+      cam.quaternion.copy(f.cameraQuaternion);
+    } else {
+      // Orbite autour du corps (le bassin pendant une chute), hauteur des yeux.
+      const target = f.weight > 0.5 ? f.joints.pelvis : this.camLook.copy(f.position).setY(f.position.y + 0.8);
+      const o = v.orbit;
+      cam.position.set(
+        target.x + Math.sin(o.yaw) * Math.cos(o.pitch) * o.distance,
+        target.y + Math.sin(o.pitch) * o.distance,
+        target.z + Math.cos(o.yaw) * Math.cos(o.pitch) * o.distance,
+      );
+      cam.lookAt(target);
+    }
+    this.level.followShadow(f.position);
+    this.renderer.render(this.scene, cam);
+  }
+
+  // Garde-fous.
+  private stuckTimer = 0;
+  private overlapTimer = 0;
+  private readonly stuckFrom = new THREE.Vector3();
+  /** Nombre de remises en place et dernière raison (debug, tests). */
+  private relocations = 0;
+  private lastRelocation = '';
+
+  /**
+   * Garde-fous, à chaque pas : position invalide, sortie du parc ou sous le plan de chute, capsule
+   * enfoncée dans le décor, skateur figé en l'air (posé sur une arête sans contact de sol).
+   * Le skateur est alors ramené à son dernier point sûr, et le combo en cours est abandonné.
+   */
+  private checkSafety(dt: number): void {
+    const sk = this.skater;
+    if (sk.bailing) {
+      this.stuckTimer = this.overlapTimer = 0;
+      return;
+    }
+    const p = sk.position;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z) || !Number.isFinite(sk.velocity.x)) {
+      this.relocate('invalid', true);
+      return;
+    }
+    const limit = this.level.halfExtent + SAFETY.outOfBoundsMargin;
+    if (p.y < WORLD.killPlaneY || Math.abs(p.x) > limit || Math.abs(p.z) > limit) {
+      this.relocate('bounds');
+      return;
+    }
+    // Enfoncé dans le décor : test d'une capsule un peu plus fine que le corps, sur sol plat seulement.
+    if (sk.up.y >= SAFETY.overlapMinUpY && !sk.grinding) {
+      const free = this.physics.isStandingSpaceFree(p, BODY.capsuleHalfHeight, BODY.capsuleRadius * SAFETY.overlapRadiusScale, BODY.capsuleClearance);
+      this.overlapTimer = free ? 0 : this.overlapTimer + dt;
+      if (this.overlapTimer >= SAFETY.overlapTime) {
+        this.relocate('overlap');
+        return;
+      }
+    } else {
+      this.overlapTimer = 0;
+    }
+    // Figé en l'air : la gravité doit faire bouger le skateur.
+    if (!sk.grounded && !sk.grinding) {
+      if (this.stuckTimer === 0) this.stuckFrom.copy(p);
+      this.stuckTimer += dt;
+      if (this.stuckTimer >= SAFETY.stuckTime) {
+        if (p.distanceTo(this.stuckFrom) < SAFETY.stuckMinMove) {
+          this.relocate('stuck');
+          return;
+        }
+        this.stuckTimer = 0;
+      }
+    } else {
+      this.stuckTimer = 0;
+    }
+  }
+
+  /** Ramène le skateur à son dernier point sûr (ou au départ si `toSpawn`). */
+  private relocate(reason: string, toSpawn = false): void {
+    this.relocations++;
+    this.lastRelocation = reason;
+    this.stuckTimer = this.overlapTimer = 0;
+    // Le dernier point sûr est l'endroit même du problème, ou hors du parc : retour au départ, sans boucle.
+    const safe = this.skater.lastSafePosition;
+    const inside = Math.abs(safe.x) < this.level.halfExtent && Math.abs(safe.z) < this.level.halfExtent;
+    // Point sûr hors des murs (le sol déborde) : il ne ramènerait pas dans le parc.
+    if (!inside || (reason !== 'bounds' && this.skater.position.distanceTo(safe) < 0.5)) toSpawn = true;
+    if (toSpawn) {
+      this.respawn();
+      return;
+    }
+    this.score.reset();
+    this.bail.end();
+    this.forwardView.copy(this.skater.forward).setY(0);
+    if (this.forwardView.lengthSq() < 1e-6 || !Number.isFinite(this.forwardView.x)) this.forwardView.set(0, 0, -1);
+    this.skater.recover(this.skater.lastSafePosition, this.forwardView.normalize());
+    this.skaterVisual.teleportSync();
+    this.updateCameraTarget();
+    this.cameraRig.snap(this.cameraTarget);
+  }
+
   private readonly hudView = { speed: 0, balanceName: null as string | null, balance: 0 };
 
   /** Caméras des menus : orbite lente sur l'accueil, vue de face du skateur en personnalisation. */
@@ -716,6 +931,22 @@ export class Game implements MenuHost {
     this.camLook.set(target.x, target.y + 0.75, target.z);
     cam.lookAt(this.camLook);
   }
+
+  /** Exception dans la boucle : la partie s'arrête avec un message clair, la progression est écrite. */
+  private onFatalError(e: unknown): void {
+    console.error(e);
+    void this.profile.flush();
+    showErrorScreen({
+      title: 'Le jeu s’est arrêté',
+      message: 'Une erreur inattendue a interrompu la partie. Ta progression est sauvegardée ; recharger la page relance le jeu.',
+      detail: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  /** Fenêtre qui perd le focus (autre application, notification) en pleine partie : pause. */
+  private readonly onBlur = (): void => {
+    if (this.mode === 'play' && !this.menus.isOpen && !this.replayActive) this.openPause();
+  };
 
   private readonly onVisibility = (): void => {
     if (document.hidden) {

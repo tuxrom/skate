@@ -11,7 +11,20 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
-    chunkSizeWarningLimit: 2500,
+    // Le morceau Rapier pèse 4,3 Mo (1,7 Mo compressé), presque tout en WASM encodé en base64 :
+    // seuil relevé pour ce seul morceau connu, le code du jeu fait environ 240 Ko.
+    chunkSizeWarningLimit: 4500,
+    rolldownOptions: {
+      output: {
+        // Bibliothèques à part : chargées en parallèle, et gardées en cache quand seul le code du jeu change.
+        advancedChunks: {
+          groups: [
+            { name: 'rapier', test: /node_modules[\\/]@dimforge/ },
+            { name: 'three', test: /node_modules[\\/]three/ },
+          ],
+        },
+      },
+    },
   },
   plugins: [
     VitePWA({

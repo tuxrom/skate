@@ -1,4 +1,4 @@
-import { PROGRESSION, SETTINGS_LIMITS } from '@/config/physics';
+import { FLICK, PROGRESSION, SETTINGS_LIMITS } from '@/config/physics';
 import { TOUCH, type GraphicsQuality, type TouchButtonId, type TouchButtonLayout } from '@/config/render';
 import type { ScoreRecords } from '@/score/ScoreSystem';
 import { BOARDS, COLORS, DEFAULT_CUSTOMIZATION, type Customization } from '@/progress/unlocks';
@@ -69,7 +69,7 @@ export function defaultSettings(): Settings {
     quality: defaultQuality(),
     volume: 0.8,
     muted: false,
-    flickSensitivity: 1,
+    flickSensitivity: FLICK.sensitivity,
     mouseSensitivity: 1,
     padLayout: 'auto',
     touchMode: 'auto',
@@ -116,7 +116,7 @@ export function sanitizeSave(raw: unknown): SaveData {
     if (s.quality === 'low' || s.quality === 'medium' || s.quality === 'high') d.quality = s.quality;
     d.volume = clamp(num(s.volume, d.volume), 0, 1);
     d.muted = s.muted === true;
-    d.flickSensitivity = clamp(num(s.flickSensitivity, 1), SETTINGS_LIMITS.flickSensitivityMin, SETTINGS_LIMITS.flickSensitivityMax);
+    d.flickSensitivity = clamp(num(s.flickSensitivity, FLICK.sensitivity), SETTINGS_LIMITS.flickSensitivityMin, SETTINGS_LIMITS.flickSensitivityMax);
     d.mouseSensitivity = clamp(num(s.mouseSensitivity, 1), SETTINGS_LIMITS.mouseSensitivityMin, SETTINGS_LIMITS.mouseSensitivityMax);
     if (s.padLayout === 'xbox' || s.padLayout === 'playstation' || s.padLayout === 'auto') d.padLayout = s.padLayout;
     if (s.touchMode === 'auto' || s.touchMode === 'on' || s.touchMode === 'off') d.touchMode = s.touchMode;

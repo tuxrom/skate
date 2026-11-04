@@ -9,6 +9,8 @@ export interface LoopCallbacks {
    * @param frameDt durée réelle de la frame (s), bornée.
    */
   render(alpha: number, frameDt: number): void;
+  /** Exception pendant une frame : la boucle s'arrête (plutôt que de relancer l'erreur à chaque frame). */
+  onError?(error: unknown): void;
 }
 
 export interface LoopStats {
@@ -16,6 +18,10 @@ export interface LoopStats {
   frameMs: number;
   stepsPerFrame: number;
   droppedSteps: number;
+  /** Temps CPU moyen par frame passé dans la simulation (ms), sur la dernière fenêtre de stats. */
+  fixedMs: number;
+  /** Temps CPU moyen par frame passé dans le rendu (ms) : JS et envoi des commandes WebGL. */
+  renderMs: number;
 }
 
 /**
@@ -23,7 +29,7 @@ export interface LoopStats {
  * La simulation avance par pas de FIXED_DT, le rendu interpole avec alpha.
  */
 export class GameLoop {
-  readonly stats: LoopStats = { fps: 0, frameMs: 0, stepsPerFrame: 0, droppedSteps: 0 };
+  readonly stats: LoopStats = { fps: 0, frameMs: 0, stepsPerFrame: 0, droppedSteps: 0, fixedMs: 0, renderMs: 0 };
 
   private accumulator = 0;
   private lastTime = -1;
@@ -33,6 +39,8 @@ export class GameLoop {
   private statFrames = 0;
   private statTime = 0;
   private statSteps = 0;
+  private statFixed = 0;
+  private statRender = 0;
 
   constructor(
     private readonly callbacks: LoopCallbacks,
@@ -55,12 +63,23 @@ export class GameLoop {
     if (!this.running) return;
     this.rafId = requestAnimationFrame(this.tick);
 
+    try {
+      this.frame(now);
+    } catch (e) {
+      this.stop();
+      if (this.callbacks.onError) this.callbacks.onError(e);
+      else throw e;
+    }
+  };
+
+  private frame(now: number): void {
     if (this.lastTime < 0) this.lastTime = now;
     const frameDt = Math.min((now - this.lastTime) / 1000, SIMULATION.maxFrameDelta);
     this.lastTime = now;
 
     this.accumulator += frameDt;
     let steps = 0;
+    const t0 = performance.now();
     while (this.accumulator >= FIXED_DT) {
       if (steps >= SIMULATION.maxStepsPerFrame) {
         // Trop de retard : on jette le reste plutôt que de geler.
@@ -73,9 +92,12 @@ export class GameLoop {
       steps++;
     }
 
+    const t1 = performance.now();
     this.callbacks.render(this.accumulator / FIXED_DT, frameDt);
+    this.statFixed += t1 - t0;
+    this.statRender += performance.now() - t1;
     this.updateStats(frameDt, steps);
-  };
+  }
 
   private updateStats(frameDt: number, steps: number): void {
     this.statFrames++;
@@ -85,6 +107,9 @@ export class GameLoop {
       this.stats.fps = this.statFrames / this.statTime;
       this.stats.frameMs = (this.statTime / this.statFrames) * 1000;
       this.stats.stepsPerFrame = this.statSteps / this.statFrames;
+      this.stats.fixedMs = this.statFixed / this.statFrames;
+      this.stats.renderMs = this.statRender / this.statFrames;
+      this.statFixed = this.statRender = 0;
       this.statFrames = 0;
       this.statSteps = 0;
       this.statTime = 0;

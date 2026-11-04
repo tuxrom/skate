@@ -225,6 +225,27 @@ html.touch-ui .hud-top { width: min(54vw, 460px); }
 html.touch-ui .hud-toasts { bottom: max(54px, calc(env(safe-area-inset-bottom) + 46px)); width: min(50vw, 420px); }
 html.touch-ui .toast { font-size: 12px; padding: 6px 12px; }
 html.touch-ui .menu-panel { touch-action: pan-y; }
+/* ---------- Replay ---------- */
+.replay-layer { position: fixed; inset: 0; z-index: 25; display: none; touch-action: none; font-family: var(--ui-font); color: var(--ui-text);
+  user-select: none; -webkit-user-select: none; cursor: grab; }
+.replay-layer.on { display: block; }
+.replay-title { position: absolute; top: max(12px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left));
+  font: 900 18px/1 var(--ui-font); letter-spacing: 0.2em; color: #ff5c5c; text-shadow: 0 1px 3px rgba(0,0,0,0.7); }
+.replay-title::before { content: '●'; margin-right: 8px; animation: replay-blink 1.2s steps(2) infinite; }
+@keyframes replay-blink { 50% { opacity: 0.2; } }
+.replay-hint { position: absolute; top: max(14px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); font: 600 13px/1.3 var(--ui-font);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8); opacity: 0.85; white-space: nowrap; }
+.replay-bar { position: absolute; left: max(10px, env(safe-area-inset-left)); right: max(10px, env(safe-area-inset-right));
+  bottom: max(10px, env(safe-area-inset-bottom)); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px;
+  background: var(--ui-bg); border: 1px solid var(--ui-line); border-radius: 14px; cursor: default; }
+.replay-bar button { appearance: none; border: 1px solid var(--ui-line); background: rgba(255,255,255,0.06); color: var(--ui-text);
+  font: 700 13px/1 var(--ui-font); padding: 9px 12px; border-radius: 9px; min-height: 38px; cursor: pointer; }
+.replay-bar button[aria-pressed=true] { background: var(--ui-accent); color: #1b1b1b; border-color: transparent; }
+.replay-bar button.quit { color: var(--ui-bad); margin-left: auto; }
+.replay-bar input[type=range] { flex: 1 1 160px; min-width: 120px; accent-color: #ff5c5c; height: 28px; }
+.replay-bar .clock { font: 700 13px/1 var(--ui-font); font-variant-numeric: tabular-nums; min-width: 6.5em; text-align: center; }
+.replay-group { display: inline-flex; gap: 4px; }
+
 /* ---------- Plateforme ---------- */
 .rotate-overlay { position: fixed; inset: 0; z-index: 60; display: none; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; background: #14161a; color: var(--ui-text); font: 500 15px/1.4 var(--ui-font); text-align: center;

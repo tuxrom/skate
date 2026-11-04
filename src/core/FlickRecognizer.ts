@@ -302,7 +302,20 @@ export class FlickRecognizer {
 
     const best = candidates[0]!;
     const fallback = best.score < FLICK.minScore;
-    const trick = fallback ? 'ollie' : best.trick;
+    let trick: FlickTrickId = fallback ? 'ollie' : best.trick;
+    // Geste flou mais pas franchement un arc : le trait dont la sortie est la plus proche, plutôt que l'ollie
+    // d'office. Un kickflip dont la charge était un peu décentrée ressemble à une corde d'arc.
+    if (fallback && arcness < FLICK.fallbackMaxArcness) {
+      let bestEnd = -1;
+      for (const t of TEMPLATES) {
+        if (t.arc || t.end === null) continue;
+        const fit = gauss(angleDistance(f.endAngle, t.end), FLICK.endTolerance * s);
+        if (fit > bestEnd) {
+          bestEnd = fit;
+          trick = t.trick;
+        }
+      }
+    }
     const arc = trick === 'popShoveIt' || trick === 'treFlip' || trick === 'varialFlip' || trick === 'hardflip';
     const side: 1 | -1 | 0 = arc ? (sweep >= 0 ? 1 : -1) : 0;
     return { trick, score: best.score, side, fallback, features: { ...f }, candidates };

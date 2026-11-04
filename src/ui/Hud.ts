@@ -42,7 +42,8 @@ export class Hud {
   private visible = true;
   private challengeDirty = true;
   private comboOn = false;
-  private last = { points: '', list: '', timer: '', speed: '', timed: '' };
+  private readonly lastNum = { points: -1, mult: -1, elements: -1, timer: -1, speed: -1, timedTenths: -1, timedValue: -1 };
+  private lastLive: unknown = null;
 
   constructor(
     parent: HTMLElement,
@@ -149,26 +150,48 @@ export class Hud {
       this.combo.classList.toggle('on', on);
     }
     if (on) {
-      const points = `${fmt(c.elementPoints + c.varietyBonus)} <span class="hud-combo-mult">× ${c.multiplier.toFixed(1)}</span>`;
-      if (points !== this.last.points) this.comboPoints.innerHTML = this.last.points = points;
+      // Textes reconstruits seulement quand les valeurs changent : pas de chaîne neuve à chaque image.
+      const points = Math.round(c.elementPoints + c.varietyBonus);
+      const mult = Math.round(c.multiplier * 10);
+      if (points !== this.lastNum.points || mult !== this.lastNum.mult) {
+        this.lastNum.points = points;
+        this.lastNum.mult = mult;
+        this.comboPoints.innerHTML = `${fmt(points)} <span class="hud-combo-mult">× ${(mult / 10).toFixed(1)}</span>`;
+      }
       const n = c.elements.length;
-      const from = Math.max(0, n - HUD.comboVisibleElements + (c.live ? 1 : 0));
-      let list = from > 0 ? '… + ' : '';
-      for (let i = from; i < n; i++) list += (i > from ? ' + ' : '') + c.elements[i]!.label;
-      if (c.live) list += `${n > from ? ' + ' : ''}${c.live.label}…`;
-      if (list !== this.last.list) this.comboList.textContent = this.last.list = list;
+      if (n !== this.lastNum.elements || c.live !== this.lastLive) {
+        this.lastNum.elements = n;
+        this.lastLive = c.live;
+        const from = Math.max(0, n - HUD.comboVisibleElements + (c.live ? 1 : 0));
+        let list = from > 0 ? '… + ' : '';
+        for (let i = from; i < n; i++) list += (i > from ? ' + ' : '') + c.elements[i]!.label;
+        if (c.live) list += `${n > from ? ' + ' : ''}${c.live.label}…`;
+        this.comboList.textContent = list;
+      }
       const left = c.live ? 1 : Math.max(0, 1 - c.groundTime / SCORING.comboGroundTime);
-      const w = `${Math.round(left * 100)}%`;
-      if (w !== this.last.timer) this.comboTimer.style.width = this.last.timer = w;
+      const pct = Math.round(left * 100);
+      if (pct !== this.lastNum.timer) {
+        this.lastNum.timer = pct;
+        this.comboTimer.style.width = `${pct}%`;
+      }
+    } else {
+      this.lastNum.elements = -1;
+      this.lastLive = null;
     }
-    const speed = `${Math.round(view.speed * 3.6)}<small>km/h</small>`;
-    if (speed !== this.last.speed) this.speed.innerHTML = this.last.speed = speed;
+    const kmh = Math.round(view.speed * 3.6);
+    if (kmh !== this.lastNum.speed) {
+      this.lastNum.speed = kmh;
+      this.speed.innerHTML = `${kmh}<small>km/h</small>`;
+    }
 
     if (this.challengeDirty) this.rebuildChallenge();
     const t = this.challenges.timed;
-    const timed = t ? `⏱ ${t.timeLeft.toFixed(1)} s · ${fmt(t.value)} / ${fmt(t.target)}` : '';
-    if (timed !== this.last.timed) {
-      this.challengeTimer.textContent = this.last.timed = timed;
+    const tenths = t ? Math.ceil(t.timeLeft * 10) : -1;
+    const value = t ? t.value : -1;
+    if (tenths !== this.lastNum.timedTenths || value !== this.lastNum.timedValue) {
+      this.lastNum.timedTenths = tenths;
+      this.lastNum.timedValue = value;
+      this.challengeTimer.textContent = t ? `⏱ ${(tenths / 10).toFixed(1)} s · ${fmt(t.value)} / ${fmt(t.target)}` : '';
       this.challengeTimer.style.display = t ? 'block' : 'none';
     }
     this.balanceMeter.update(view.balanceName, view.balance);

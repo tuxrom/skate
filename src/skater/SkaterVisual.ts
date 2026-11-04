@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { InterpolatedBody } from '@/physics/InterpolatedBody';
 import type { Skater } from './Skater';
-import { copyPose, createPose, type SkaterRig } from './SkaterRig';
+import { copyPose, createPose, type SkaterPose, type SkaterRig } from './SkaterRig';
 
 /** Relie la simulation du skateur à son rig : transform et pose d'animation interpolés. */
 export class SkaterVisual {
@@ -21,6 +21,11 @@ export class SkaterVisual {
   ) {
     this.body = new InterpolatedBody(skater, rig.root);
     this.teleportSync();
+  }
+
+  /** Pose d'animation du dernier pas fixe (enregistrement du replay). */
+  get currentPose(): Readonly<SkaterPose> {
+    return this.curr;
   }
 
   get object(): THREE.Object3D {

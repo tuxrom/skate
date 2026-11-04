@@ -38,6 +38,10 @@ export interface MenuHost {
   readonly installState: InstallState;
   /** Ouvre la boîte de dialogue d'installation du navigateur. */
   installApp(): void;
+  /** Durée enregistrée disponible pour le replay (s). */
+  readonly replayDuration: number;
+  /** Lance le replay des dernières secondes. */
+  startReplay(): void;
 }
 
 /** Délai pour confirmer l'effacement de la progression (ms). */
@@ -228,6 +232,12 @@ export class Menus {
     const b = add(p, 'div', 'menu-buttons');
     this.button(b, 'Reprendre', () => this.host.resume(), 'primary', 'resume');
     this.button(b, 'Retour au départ', () => this.host.restart(), '', 'restart');
+    if (this.host.replayDuration >= 1) {
+      this.button(b, `Replay (${Math.round(this.host.replayDuration)} s)`, () => {
+        this.host.click();
+        this.host.startReplay();
+      }, '', 'replay');
+    }
     this.button(b, 'Objectifs', () => this.push('objectives'), '', 'objectives');
     this.button(b, 'Personnaliser', () => this.push('custom'), '', 'custom');
     this.button(b, 'Réglages', () => this.push('settings'), '', 'settings');
@@ -321,8 +331,9 @@ export class Menus {
     this.segmented<GraphicsQuality>(q, 'quality', [['low', 'Bas'], ['medium', 'Moyen'], ['high', 'Haut']], s.quality, (v) => prof.updateSettings({ quality: v }));
     const preset = QUALITY_PRESETS[s.quality];
     add(p, 'p').textContent =
-      `Ombres ${preset.shadows ? `activées (${preset.shadowMapSize} px)` : 'désactivées'}, résolution ${Math.round(preset.resolutionScale * 100)} % ` +
-      `(pixel ratio ≤ ${preset.maxPixelRatio}), brouillard de ${preset.fogNear} à ${preset.fogFar} m.`;
+      `Ombres ${preset.shadows ? `${preset.parkShadows ? 'du skateur et du décor' : 'du skateur'} (${preset.shadowMapSize} px, ${preset.shadowExtent} m autour)` : 'désactivées'}, ` +
+      `résolution ${Math.round(preset.resolutionScale * 100)} % (pixel ratio ≤ ${preset.maxPixelRatio}), particules ${Math.round(preset.particleDensity * 100)} %, ` +
+      `brouillard de ${preset.fogNear} à ${preset.fogFar} m.`;
 
     add(p, 'h3').textContent = 'Son';
     this.range(row(p, 'Volume'), 'volume', 0, 1, 0.05, s.volume, (v) => `${Math.round(v * 100)} %`, (v) => prof.updateSettings({ volume: v }));

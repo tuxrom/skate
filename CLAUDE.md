@@ -10,6 +10,8 @@ Jeu de skateboard 3D en vue troisième personne, inspiré de la série Skate d'E
 - vite-plugin-pwa (Workbox, `generateSW`) pour le manifeste et le service worker
 - Aucun asset externe obligatoire : géométries procédurales, textures dessinées sur canvas, sons synthétisés avec la Web Audio API
 
+Le README décrit l'installation, le déploiement statique en HTTPS, les contrôles et les réglages mesurés.
+
 ## Commandes npm
 
 | Commande | Effet |
@@ -116,6 +118,8 @@ src/
     InstallPrompt.ts    invite d'installation (beforeinstallprompt retenu, aide iOS)
     DisplayMode.ts      plein écran, verrouillage en paysage, écran de rotation, menu contextuel bloqué
     PwaUpdates.ts       service worker, bandeaux « Prêt hors ligne » et « Nouvelle version »
+  replay/
+    ReplayRecorder.ts   tampon circulaire des 30 dernières secondes (skateur, planche, ragdoll, caméra), lecture interpolée
   save/
     SaveStore.ts        stockage IndexedDB avec repli localStorage, reprise des anciens records
     SaveData.ts         format de sauvegarde, valeurs par défaut, validation, niveau selon l'XP
@@ -139,11 +143,14 @@ src/
     textures.ts         textures générées par code
     DustEffect.ts       poussière d'impact : pool fixe de points, shader de fondu
     challenges.ts       zones et défis du skatepark de test (données de niveau)
-    ZoneMarkers.ts      repères des zones au sol (anneau et colonne), couleur selon l'état
+    ZoneMarkers.ts      repères des zones au sol, regroupés en deux draw calls (anneaux fusionnés, colonnes instanciées)
+    StaticBatcher.ts    regroupement du décor statique : fusion par matériau, InstancedMesh pour les pièces répétées
   ui/
     DebugOverlay.ts     FPS, temps de frame, pas physiques, draw calls, état du skateur
     FlickDebugPanel.ts  debug du flick : stick, chemin du geste, mesures, trick et scores
     BalanceMeter.ts     jauge d'équilibre des grinds et manuals
+    ReplayView.ts       lecteur du replay : lecture, temps, ralenti, caméra de jeu ou libre
+    ErrorScreen.ts      écran d'erreur autonome (démarrage WebGL / WASM, boucle arrêtée, contexte perdu)
     TouchControls.ts    contrôles tactiles : joystick flottant, zone de swipe, boutons, éditeur de disposition, détection du mode tactile
     Hud.ts              HUD : combo, nom du trick, validation et annulation animées, vitesse, niveau, objectifs, notifications
     Menus.ts            accueil, pause, réglages, personnalisation, objectifs, aide ; navigation clavier et manette
@@ -201,6 +208,10 @@ src/
 - **PWA** (`vite.config.ts`, `registerType: 'prompt'`) : manifeste complet (`display: standalone` avec `display_override` plein écran, paysage, `start_url` et `scope` à `/`, icônes 192 et 512 dont une maskable). Le service worker précache tout le build ; le WASM de Rapier est intégré en base64 au bundle JS (`rapier3d-compat`) et part donc avec lui, d'où `maximumFileSizeToCacheInBytes` relevé. Navigations hors ligne servies par `index.html`, autres requêtes de même origine en stale-while-revalidate (`skate-runtime`). `clientsClaim` : le premier service worker prend la page ouverte ; une nouvelle version attend l'accord du joueur (bandeau, `PwaUpdates`), qui recharge aussi au changement de contrôleur quand workbox-window ne le fait pas (première visite).
 - **Plateforme** : `InstallPrompt` est créé dans `main.ts` avant tout `await` pour ne pas manquer `beforeinstallprompt` ; carte d'installation sur l'accueil (« Plus tard » mémorisé dans les réglages), écran d'aide iOS. `DisplayMode.enterGame` (appelé dans le clic de « Jouer » ou « Reprendre », geste du joueur oblige) demande le plein écran si le réglage l'autorise et en interface tactile, puis `screen.orientation.lock('landscape')` ; en portrait sur interface tactile, l'écran de rotation recouvre tout et met la partie en pause. Zoom, pull-to-refresh, défilement élastique, sélection et menu contextuel sont neutralisés (`index.html`, `DisplayMode`, `TouchControls`).
 - **Vérification PWA** : Lighthouse a retiré sa catégorie PWA à partir de la v12 ; l'audit se fait avec `lighthouse@11` (`--only-categories=pwa`) sur `npm run preview`. Le hors ligne se vérifie à part (navigateur hors ligne après installation du service worker, rechargement, partie lancée).
+- **Performances** (étape 11) : le décor est regroupé après construction (`batchStatic`) ; les géométries identiques sont partagées par l'`AssetProvider` (cache par paramètres, tubes à longueur 1 mis à l'échelle), ce qui permet l'instanciation. Ombres : skateur seul en qualité basse et moyenne, décor en haute, zone d'ombre réduite (`QualityPreset.shadowExtent`), petites pièces du rig sans ombre. Le pas Rapier ne tourne que s'il y a des corps dynamiques (plus un pas après leur retrait). La manette est lue une fois par image (`GAMEPAD_REFRESH_MS`). Sons en pools de voix (`AUDIO`). Bundle découpé en `three`, `rapier` et code du jeu. Profilage : `GameLoop.stats.fixedMs` / `renderMs`, et dans `debugState()` draw calls, triangles, meshes, objets projetant une ombre. Mesures et méthode dans le README.
+- **Garde-fous** (`Game.checkSafety`, réglages `SAFETY`) : position invalide, sortie du parc ou sous le plan de chute, capsule enfoncée dans le décor (sur sol plat), skateur figé en l'air : retour au dernier point sûr, ou au départ si ce point est lui-même en cause ou hors du parc. Pause automatique à la perte de focus.
+- **Erreurs** : `main.ts` vérifie WebAssembly et WebGL 2 avant de démarrer et affiche un message clair (`BootError`, `ErrorScreen`). Une exception dans la boucle l'arrête (`LoopCallbacks.onError`) avec un message, après écriture de la sauvegarde. Contexte WebGL perdu : pause et écran d'attente, restauration automatique (`Renderer.onContextLost` / `onContextRestored`).
+- **Replay** : `Game.recordReplay` enregistre un pas fixe sur deux l'état affiché (pose de `Skater.readPose`, planche lâchée comprise, pose d'animation de `SkaterVisual.currentPose`, articulations du ragdoll, caméra). Pause > Replay : la simulation reste figée, `renderReplay` applique l'image interpolée au rig et à la caméra (enregistrée ou orbite libre), puis le rendu normal reprend à la sortie.
 - **Rendu** : `devicePixelRatio` plafonné à `RENDER.maxPixelRatio` (2). Cible : 60 fps sur mobile milieu de gamme.
 
 ## Conventions de code
@@ -229,7 +240,7 @@ src/
 - [x] 8. HUD, menus, sauvegarde : HUD (combo, nom du trick, validation et annulation animées, jauge, vitesse, niveau, objectifs, notifications), écran de chargement, menus responsive (accueil, pause, réglages, personnalisation, objectifs, aide illustrée), qualité graphique réelle, défis de zone, niveau et déblocages, sauvegarde IndexedDB avec repli localStorage, manette Xbox / PlayStation dans le jeu et les menus
 - [x] 9. Contrôles tactiles : joystick flottant, swipe des flicks par le même code que la souris, boutons déplaçables et redimensionnables, multitouch, touchcancel, gestes du navigateur neutralisés, retour haptique, bascule automatique HUD PC / mobile, safe areas ; reconnaissance des flicks vifs (rayon minimal mesuré sur les segments)
 - [x] 10. PWA : manifeste complet et icônes PNG (dont maskable), précache de tout le build (WASM compris) et stale-while-revalidate pour le reste, mise à jour sur accord du joueur, hors ligne vérifié, invite d'installation et aide iOS, plein écran et verrouillage en paysage, écran de rotation ; Lighthouse 11 PWA : 100
-- [ ] 11. Optimisation (découpage du bundle, le WASM inline de Rapier pèse lourd ; profilage mobile)
+- [x] 11. Optimisation et finitions : profilage CPU et GPU, décor fusionné et instancié, ombres limitées, pools de sons, allocations réduites, qualité qui règle aussi les particules, bundle découpé ; passe de réglage mesurée (sensibilité des flicks 1,2, repli des gestes flous) ; garde-fous anti-coincement et hors zone, pause à la perte de focus, erreurs WASM et WebGL ; replay des 30 dernières secondes avec caméra libre et ralenti ; README
 
 ## Règle de fin d'étape
 

@@ -52,6 +52,10 @@ export interface MaterialFeel {
   grindFriction: number;
 }
 
+/**
+ * Mesuré à l'étape 11 (béton) : roue libre de 6 à 1 m/s en 19 s sur 64 m, soit 0,26 m/s² en moyenne, roulement
+ * et air compris ; l'élan porte d'un module à l'autre. Valeur conservée.
+ */
 export const MATERIALS: Readonly<Record<SurfaceMaterial, MaterialFeel>> = {
   concrete: { friction: 0.9, restitution: 0.0, rollingResistance: 0.018, speedMultiplier: 1.0, grindFriction: 1.2 },
   asphalt: { friction: 1.0, restitution: 0.0, rollingResistance: 0.03, speedMultiplier: 0.9, grindFriction: 1.6 },
@@ -170,7 +174,11 @@ export const SKATING = {
 export const POP = {
   /** Hauteur de vol du contact au-dessus du point de pop, charge minimale (m). */
   minHeight: 0.22,
-  /** Hauteur de vol à pleine charge (m). La vitesse de pop vaut √(2·g·h). */
+  /**
+   * Hauteur de vol à pleine charge (m). La vitesse de pop vaut √(2·g·h).
+   * Mesuré à l'étape 11 : 0,83 m et 0,73 s de vol à l'arrêt, saut de 4,3 m à 6 m/s ; le gap de 1,6 m
+   * passe dès 5 m/s d'appel, l'escalier de 85 cm se descend proprement de 7 à 9 m/s. Valeur conservée.
+   */
   maxHeight: 0.85,
   /** Durée de charge pour atteindre la pleine hauteur (s). La hauteur est linéaire en charge. */
   chargeTime: 0.4,
@@ -402,7 +410,11 @@ export const BAIL = {
   maxLandingTilt: 0.6,
   /** Écart max de cap entre la planche et la vitesse à la réception (rad). Au-delà : chute. */
   maxLandingYawError: 0.7,
-  /** Vitesse verticale d'impact au-delà de laquelle on chute (m/s, valeur positive). */
+  /**
+   * Vitesse verticale d'impact au-delà de laquelle on chute (m/s, valeur positive).
+   * Mesuré à l'étape 11 : un ollie depuis le palier de l'escalier (85 cm) arrive à 6 m/s ; la marge
+   * laisse passer les plus gros sauts du parc sans rendre la chute aléatoire. Valeur conservée.
+   */
   maxImpactSpeed: 11.0,
   /** Vitesse d'impact contre un mur (composante normale) qui provoque la chute (m/s). */
   wallImpactSpeed: 5.0,
@@ -471,6 +483,22 @@ export const BAIL = {
   impactSoundCooldown: 0.12,
 } as const;
 
+/** Garde-fous : sortie du parc, coincement dans le décor. */
+export const SAFETY = {
+  /** Distance au-delà des murs du parc à partir de laquelle le skateur est ramené (m). */
+  outOfBoundsMargin: 1.5,
+  /** En l'air sans bouger de plus de stuckMinMove pendant cette durée : coincé, ramené (s). */
+  stuckTime: 0.8,
+  /** Déplacement minimal attendu sur stuckTime en l'air (m) : la gravité seule en fait bien plus. */
+  stuckMinMove: 0.03,
+  /** Capsule du corps enfoncée dans le décor (sur sol plat) pendant cette durée : ramené (s). */
+  overlapTime: 0.3,
+  /** Réduction du rayon de la capsule pour le test d'enfoncement : un simple contact ne compte pas. */
+  overlapRadiusScale: 0.7,
+  /** Le test d'enfoncement ne se fait que sur un sol presque plat (cos de la pente) : sur une rampe, une capsule verticale touche toujours. */
+  overlapMinUpY: 0.97,
+} as const;
+
 /** Fenêtres et délais d'input. */
 export const INPUT = {
   /** Un tap d'ollie fait juste avant la réception déclenche un pop à la réception (ms). */
@@ -525,10 +553,11 @@ const DEG = Math.PI / 180;
  */
 export const FLICK = {
   /**
-   * Sensibilité de la reconnaissance : multiplie toutes les tolérances.
-   * 1 par défaut, 1,5 plus permissif, 0,7 plus exigeant.
+   * Sensibilité de la reconnaissance : multiplie toutes les tolérances (valeur par défaut du réglage).
+   * 1,2 retenu à l'étape 11 : sur 300 gestes bruités par trick, 92 % de reconnaissance contre 91 % à 1
+   * et 86 % à 0,8, sans perte sur les gestes nets. Plus haut, plus permissif ; plus bas, plus exigeant.
    */
-  sensitivity: 1,
+  sensitivity: 1.2,
   /** Rayon du stick qui démarre un geste (0 à 1). */
   startRadius: 0.3,
   /** Zone de charge : stick en bas, au-delà de ce rayon (0 à 1). */
@@ -560,8 +589,13 @@ export const FLICK = {
   endTolerance: 28 * DEG,
   /** Tolérance sur l'angle balayé (rad). */
   sweepTolerance: 40 * DEG,
-  /** Score minimal pour retenir un trick ; en dessous, un geste vers le haut donne un ollie. */
+  /**
+   * Score minimal pour retenir un trick. En dessous, si le geste n'est pas franchement un arc (arcness sous
+   * fallbackMaxArcness), le trait dont la sortie est la plus proche (ollie, kickflip, heelflip) ; sinon un ollie.
+   */
   minScore: 0.3,
+  /** « Arc-itude » (0 trait, 1 arc) au-delà de laquelle un geste flou retombe en ollie plutôt qu'en trait. */
+  fallbackMaxArcness: 0.8,
 } as const;
 
 /** Niveau du joueur : XP gagnée par les combos validés et les défis. */
@@ -599,6 +633,8 @@ export const SCORING = {
    * il est suspendu en l'air, en grind et en manual. À l'échéance, le combo est validé.
    */
   comboGroundTime: 1.0,
+  // Enchaîner deux sauts demande 0,55 s au sol (récupération 0,08 + pleine charge 0,4 + pop 0,07) : la
+  // seconde de marge laisse le temps de viser, sans rendre le combo infini sur le plat. Valeur conservée.
 
   // Valeurs de base.
   /** Valeur de base de chaque trick du board (points). Un ollie ne compte que s'il y a eu un pop. */

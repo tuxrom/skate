@@ -343,6 +343,9 @@ const PAD_BUTTONS: ReadonlyArray<readonly [number, ButtonAction]> = [
   [9, 'pause'], // Start / Options
 ];
 
+/** Intervalle minimal entre deux lectures des manettes (ms) : moins d'une image à 120 Hz. */
+const GAMEPAD_REFRESH_MS = 6;
+
 /** Disposition des boutons, pour les libellés (les indices du mapping standard sont les mêmes). */
 export type PadFamily = 'xbox' | 'playstation';
 
@@ -362,11 +365,22 @@ export class GamepadSource implements InputSource {
   lastPadId = '';
   /** Vrai si une manette a servi pendant le dernier pas (bouton ou stick franchement poussé). */
   activeThisStep = false;
+  /**
+   * Dernière lecture de navigator.getGamepads() : le navigateur ne rafraîchit les manettes qu'une fois par
+   * image, alors que la simulation fait plusieurs pas par image. Relire à chaque pas coûtait cher pour rien.
+   */
+  private pads: readonly (Gamepad | null)[] = [];
+  private padsReadAt = -Infinity;
 
   sample(s: MutableSnapshot): void {
     this.activeThisStep = false;
     if (typeof navigator === 'undefined' || !navigator.getGamepads) return;
-    for (const pad of navigator.getGamepads()) {
+    const now = performance.now();
+    if (now - this.padsReadAt > GAMEPAD_REFRESH_MS) {
+      this.pads = navigator.getGamepads();
+      this.padsReadAt = now;
+    }
+    for (const pad of this.pads) {
       if (!pad || !pad.connected || pad.axes.length < 4) continue;
       const used = pad.buttons.some((b) => b.pressed) || pad.axes.some((a) => Math.abs(a) > 0.5);
       if (used) {

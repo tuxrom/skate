@@ -13,10 +13,10 @@ export const RENDER = {
   /** Distances du brouillard linéaire (m). */
   fogNear: 60,
   fogFar: 220,
-  /** Taille de la shadow map du soleil (px). */
+  /** Taille de la shadow map du soleil au démarrage (px), remplacée par celle de la qualité graphique. */
   shadowMapSize: 1024,
-  /** Demi-étendue de la caméra d'ombre du soleil (m). */
-  shadowExtent: 30,
+  /** Demi-étendue de la caméra d'ombre au démarrage (m), remplacée par celle de la qualité graphique. */
+  shadowExtent: 24,
 } as const;
 
 export const CAMERA = {
@@ -168,6 +168,15 @@ export interface QualityPreset {
   shadows: boolean;
   /** Taille de la shadow map (px). */
   shadowMapSize: number;
+  /**
+   * Demi-étendue de la zone d'ombre autour du skateur (m). Plus petite : ombre plus nette pour la même
+   * shadow map, et seul le sol proche reçoit des ombres.
+   */
+  shadowExtent: number;
+  /** Le décor projette aussi des ombres (sinon seul le skateur en projette, sur le sol et les modules). */
+  parkShadows: boolean;
+  /** Densité des particules de poussière (multiplie le nombre émis, 0 à 1). */
+  particleDensity: number;
   /** Brouillard linéaire (m) ; la caméra ne dessine pas au-delà de fogFar. */
   fogNear: number;
   fogFar: number;
@@ -175,10 +184,38 @@ export interface QualityPreset {
 
 /** Préréglages de qualité graphique (réglages > Graphismes). L'antialiasing reste celui du démarrage. */
 export const QUALITY_PRESETS: Readonly<Record<GraphicsQuality, QualityPreset>> = {
-  low: { maxPixelRatio: 1, resolutionScale: 0.7, shadows: false, shadowMapSize: 512, fogNear: 25, fogFar: 85 },
-  medium: { maxPixelRatio: 1.5, resolutionScale: 1, shadows: true, shadowMapSize: 1024, fogNear: 45, fogFar: 150 },
-  high: { maxPixelRatio: 2, resolutionScale: 1, shadows: true, shadowMapSize: 2048, fogNear: 60, fogFar: 220 },
+  low: { maxPixelRatio: 1, resolutionScale: 0.7, shadows: false, shadowMapSize: 512, shadowExtent: 8, parkShadows: false, particleDensity: 0.35, fogNear: 25, fogFar: 85 },
+  medium: { maxPixelRatio: 1.5, resolutionScale: 1, shadows: true, shadowMapSize: 1024, shadowExtent: 10, parkShadows: false, particleDensity: 0.7, fogNear: 45, fogFar: 150 },
+  high: { maxPixelRatio: 2, resolutionScale: 1, shadows: true, shadowMapSize: 2048, shadowExtent: 24, parkShadows: true, particleDensity: 1, fogNear: 60, fogFar: 220 },
 };
+
+/** Sons synthétisés : taille des pools de voix (au-delà, la voix la plus ancienne est reprise). */
+export const AUDIO = {
+  /** Voix de bruit filtré (claquements, chocs). */
+  noiseVoices: 8,
+  /** Voix d'oscillateur (corps des sons). */
+  toneVoices: 10,
+} as const;
+
+/** Replay : enregistrement des dernières secondes et caméra libre. */
+export const REPLAY = {
+  /** Durée conservée (s). */
+  duration: 30,
+  /** Fréquence d'enregistrement (Hz) : un pas fixe sur deux. */
+  sampleHz: 60,
+  /** Vitesses de lecture proposées. */
+  speeds: [1, 0.5, 0.25] as readonly number[],
+  /** Caméra libre : distance de départ, bornes (m) et sensibilité au glissé (rad/px). */
+  orbitDistance: 4.5,
+  orbitMinDistance: 1.2,
+  orbitMaxDistance: 18,
+  orbitDragSpeed: 0.008,
+  /** Bornes de l'inclinaison de la caméra libre (rad, 0 à l'horizontale). */
+  orbitMinPitch: -0.15,
+  orbitMaxPitch: 1.35,
+  /** Zoom à la molette (par unité de deltaY). */
+  wheelZoom: 0.0012,
+} as const;
 
 export const DEBUG = {
   /** Intervalle de rafraîchissement du compteur FPS (s). */

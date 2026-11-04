@@ -5,6 +5,7 @@ import { SaveStore } from '@/save/SaveStore';
 import { Profile } from '@/progress/Profile';
 import { InstallPrompt } from '@/platform/InstallPrompt';
 import { PwaUpdates } from '@/platform/PwaUpdates';
+import { BootError, showErrorScreen } from '@/ui/ErrorScreen';
 
 declare global {
   interface Window {
@@ -36,16 +37,38 @@ const loading = {
 // Écoute de beforeinstallprompt dès le chargement du script : l'événement peut précéder la création du jeu.
 const install = new InstallPrompt();
 
+/** WebGL 2 disponible (Three.js en a besoin) ? Sonde sur un canvas jetable. */
+function hasWebGL2(): boolean {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    return !!gl;
+  } catch {
+    return false;
+  }
+}
+
+const WEBGL_HELP =
+  'Le jeu a besoin de WebGL 2 pour l’affichage 3D. Active l’accélération matérielle dans les réglages du navigateur, ' +
+  'mets à jour le navigateur ou les pilotes graphiques, ou essaie un autre navigateur (Chrome, Firefox, Safari récents).';
+const WASM_HELP =
+  'Le moteur physique (WebAssembly) n’a pas pu démarrer. Mets à jour le navigateur ; si WebAssembly est désactivé ' +
+  '(mode de sécurité renforcée, politique d’entreprise), réactive-le pour ce site.';
+
 async function boot(): Promise<void> {
   const container = document.getElementById('app');
   if (!container) throw new Error('#app introuvable');
+  if (typeof WebAssembly !== 'object') throw new BootError('WebAssembly indisponible', WASM_HELP);
+  if (!hasWebGL2()) throw new BootError('WebGL indisponible', WEBGL_HELP);
 
   const params = new URLSearchParams(location.search);
   const debug = import.meta.env.DEV || params.has('debug');
 
   await loading.step(0.1, 'Moteur physique…');
   const assets = new ProceduralAssets();
-  const rapierPromise = loadRapier();
+  const rapierPromise = loadRapier().catch((e: unknown) => {
+    throw new BootError('Moteur physique indisponible', WASM_HELP, e);
+  });
   const storePromise = SaveStore.open();
   await loading.step(0.35, 'Textures…');
   await assets.preload();
@@ -54,7 +77,14 @@ async function boot(): Promise<void> {
   const rapier = await rapierPromise;
   await loading.step(0.8, 'Construction du skatepark…');
 
-  const game = new Game({ container, rapier, assets, debug, profile, install });
+  let game: Game;
+  try {
+    game = new Game({ container, rapier, assets, debug, profile, install });
+  } catch (e) {
+    // Three.js lève « Error creating WebGL context » quand le contexte est refusé malgré la sonde.
+    if (e instanceof Error && /webgl/i.test(e.message)) throw new BootError('WebGL indisponible', WEBGL_HELP, e);
+    throw e;
+  }
   game.start();
   if (debug) window.__skate = game;
   await loading.step(1, 'Prêt');
@@ -69,15 +99,14 @@ async function boot(): Promise<void> {
 
 boot().catch((err: unknown) => {
   console.error(err);
-  const msg = document.querySelector<HTMLElement>('#loading .msg');
-  const text = `Erreur au démarrage : ${err instanceof Error ? err.message : String(err)}`;
-  if (msg) {
-    msg.textContent = text;
-    msg.style.color = '#f66';
-    return;
+  document.getElementById('loading')?.remove();
+  if (err instanceof BootError) {
+    showErrorScreen({ title: err.title, message: err.userMessage, detail: err.message !== err.title ? err.message : undefined });
+  } else {
+    showErrorScreen({
+      title: 'Le jeu n’a pas pu démarrer',
+      message: 'Une erreur inattendue a empêché le chargement. Recharger la page suffit souvent.',
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
-  const pre = document.createElement('pre');
-  pre.style.cssText = 'color:#f66;padding:16px;font:14px monospace;white-space:pre-wrap';
-  pre.textContent = text;
-  document.body.appendChild(pre);
 });

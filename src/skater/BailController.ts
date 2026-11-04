@@ -221,18 +221,23 @@ export class BailController implements PoseSource {
    * Articulations à appliquer au rig pour ce rendu et leur poids, ou null hors chute.
    * Pendant la relève, le poids décroît de 1 à 0 : la pose au sol fond vers la pose debout.
    */
-  renderJoints(alpha: number): { joints: RagdollJoints; weight: number } | null {
+  renderJoints(alpha: number): { readonly joints: RagdollJoints; readonly weight: number } | null {
+    // Objet réutilisé : appelé à chaque rendu pendant une chute, sans allocation.
+    const out = this.renderOut;
     if (this.phase === 'ragdoll') {
       this.ragdoll.interpolate(alpha, this.interpolated);
-      return { joints: this.interpolated, weight: 1 };
+      out.weight = 1;
+      return out;
     }
     if (this.phase === 'getup') {
       const t = Math.min(1, this.getUpTime / this.getUpDuration);
       copyJoints(this.interpolated, this.frozen);
-      return { joints: this.interpolated, weight: 1 - t * t * (3 - 2 * t) };
+      out.weight = 1 - t * t * (3 - 2 * t);
+      return out;
     }
     return null;
   }
+  private readonly renderOut: { joints: RagdollJoints; weight: number } = { joints: this.interpolated, weight: 0 };
 
   /** Point suivi par la caméra pendant la chute : le bassin interpolé. */
   cameraFocus(alpha: number, out: THREE.Vector3): THREE.Vector3 {

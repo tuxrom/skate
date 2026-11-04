@@ -3,6 +3,7 @@ import type { PhysicsWorld } from '@/physics/PhysicsWorld';
 import type { AssetProvider } from './assets';
 import { RENDER, type QualityPreset } from '@/config/render';
 import { GrindNetwork } from './GrindNetwork';
+import { batchStatic, type StaticBatch } from './StaticBatcher';
 import {
   addBox,
   addGrindRail,
@@ -86,7 +87,12 @@ export class Level {
   readonly sun: THREE.DirectionalLight;
   /** Lignes de grind : rails, arêtes de ledges et de boxes, copings. */
   readonly grinds = new GrindNetwork();
+  /** Demi-côté de la zone roulable, à l'intérieur des murs (m). */
+  readonly halfExtent = PARK_HALF;
   private readonly snapped = new THREE.Vector3();
+  /** Décor regroupé (fusion par matériau, instanciation des pièces répétées). */
+  private readonly batch: StaticBatch;
+  private shadowExtent: number = RENDER.shadowExtent;
 
   constructor(scene: THREE.Scene, physics: PhysicsWorld, assets: AssetProvider) {
     this.root.name = 'level';
@@ -110,6 +116,13 @@ export class Level {
     this.buildGround(ctx);
     this.buildWalls(ctx);
     this.buildModules(ctx);
+    // Le sol reste à part : il reçoit les ombres sans en projeter.
+    this.batch = batchStatic(this.root);
+  }
+
+  /** Draw calls du décor avant et après regroupement (debug). */
+  get batchStats(): { before: number; after: number } {
+    return { before: this.batch.before, after: this.batch.meshes.length };
   }
 
   private buildGround(ctx: BuildContext): void {
@@ -202,7 +215,15 @@ export class Level {
       scene.fog.far = q.fogFar;
     }
     this.sun.castShadow = q.shadows;
+    // Ombres du décor seulement en qualité haute : sinon le skateur seul en projette, sur le sol proche.
+    for (const m of this.batch.meshes) if (m.name !== 'ground') m.castShadow = q.parkShadows;
     const shadow = this.sun.shadow;
+    if (q.shadowExtent !== this.shadowExtent) {
+      this.shadowExtent = q.shadowExtent;
+      const s = q.shadowExtent;
+      Object.assign(shadow.camera, { left: -s, right: s, top: s, bottom: -s });
+      shadow.camera.updateProjectionMatrix();
+    }
     if (shadow.mapSize.x !== q.shadowMapSize) {
       shadow.mapSize.set(q.shadowMapSize, q.shadowMapSize);
       // La shadow map est recréée à la bonne taille au prochain rendu.
@@ -213,7 +234,7 @@ export class Level {
 
   /** Fait suivre la shadow map autour d'un point, calé sur la grille de texels pour éviter le scintillement. */
   followShadow(focus: THREE.Vector3): void {
-    const texel = (RENDER.shadowExtent * 2) / this.sun.shadow.mapSize.x;
+    const texel = (this.shadowExtent * 2) / this.sun.shadow.mapSize.x;
     this.snapped.set(Math.round(focus.x / texel) * texel, Math.round(focus.y / texel) * texel, Math.round(focus.z / texel) * texel);
     this.sun.target.position.copy(this.snapped);
     this.sun.position.copy(this.snapped).add(SUN_OFFSET);

@@ -25,7 +25,8 @@ export interface AssetParams {
   profile?: Profile;
   /** Largeur d'extrusion du profil (m). */
   width?: number;
-  /** Longueur et rayon d'un tube 'rail', centré, le long de Y (m). */
+  /** Longueur et rayon d'un tube 'rail', centré, le long de Y (m). La longueur est une mise à l'échelle :
+   * tous les tubes de même rayon partagent une géométrie, ce qui permet de les instancier. */
   length?: number;
   radius?: number;
   finish?: Finish;
@@ -49,6 +50,8 @@ const TEXTURE_METERS = 4;
 export class ProceduralAssets implements AssetProvider {
   private readonly disposables: { dispose(): void }[] = [];
   private readonly materials = new Map<Finish, THREE.MeshStandardMaterial>();
+  /** Géométries déjà construites, par paramètres : deux demandes identiques partagent la même géométrie. */
+  private readonly geometries = new Map<string, THREE.BufferGeometry>();
 
   async preload(): Promise<void> {
     const make = (finish: Finish, tex: THREE.CanvasTexture, roughness: number) => {
@@ -65,6 +68,21 @@ export class ProceduralAssets implements AssetProvider {
     if (id === 'marker') return this.createMarker(params.radius ?? 3, params.color ?? 0xf4d35e);
     const fallback: Finish = id === 'ground' ? 'ground' : id === 'rail' ? 'metal' : 'park';
     const material = this.materials.get(params.finish ?? fallback)!;
+    const key = geometryKey(id, params);
+    let geometry = this.geometries.get(key);
+    if (!geometry) {
+      geometry = this.buildGeometry(id, params);
+      this.geometries.set(key, this.track(geometry));
+    }
+    const mesh = new THREE.Mesh(geometry, material);
+    if (id === 'rail') mesh.scale.y = params.length ?? 1;
+    mesh.receiveShadow = true;
+    mesh.castShadow = id !== 'ground';
+    mesh.name = id;
+    return mesh;
+  }
+
+  private buildGeometry(id: Exclude<AssetId, 'marker'>, params: AssetParams): THREE.BufferGeometry {
     let geometry: THREE.BufferGeometry;
     switch (id) {
       case 'ground': {
@@ -86,16 +104,13 @@ export class ProceduralAssets implements AssetProvider {
         geometry = extrudeProfile(params.profile ?? [], params.width ?? 1);
         break;
       case 'rail': {
+        // Longueur 1 : la longueur demandée est appliquée par l'échelle du mesh.
         const r = params.radius ?? 0.025;
-        geometry = new THREE.CylinderGeometry(r, r, params.length ?? 1, 12);
+        geometry = new THREE.CylinderGeometry(r, r, 1, 12);
         break;
       }
     }
-    const mesh = new THREE.Mesh(this.track(geometry), material);
-    mesh.receiveShadow = true;
-    mesh.castShadow = id !== 'ground';
-    mesh.name = id;
-    return mesh;
+    return geometry;
   }
 
   /**
@@ -130,6 +145,23 @@ export class ProceduralAssets implements AssetProvider {
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
     this.materials.clear();
+    this.geometries.clear();
+  }
+}
+
+/** Clé de cache d'une géométrie : seuls les paramètres qui changent sa forme comptent. */
+function geometryKey(id: AssetId, p: AssetParams): string {
+  const s = p.size;
+  switch (id) {
+    case 'ground':
+    case 'box':
+      return `${id}:${s ? `${s.x},${s.y},${s.z}` : ''}`;
+    case 'rail':
+      return `rail:${p.radius ?? 0.025}`;
+    case 'prism':
+      return `prism:${p.width ?? 1}:${(p.profile ?? []).map(([z, y]) => `${z},${y}`).join(';')}`;
+    case 'marker':
+      return 'marker';
   }
 }
 

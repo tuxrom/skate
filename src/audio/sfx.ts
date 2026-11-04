@@ -3,6 +3,8 @@
  * Aucun sample : bruit filtré pour le claquement, oscillateurs pour le corps du son.
  */
 
+import { AUDIO } from '@/config/render';
+
 let noiseBuffer: AudioBuffer | null = null;
 
 /** Bruit blanc d'une seconde, généré une fois par contexte. */
@@ -19,35 +21,114 @@ function noise(ctx: AudioContext): AudioBuffer {
   return buf;
 }
 
+interface NoiseVoice {
+  readonly filter: BiquadFilterNode;
+  readonly env: GainNode;
+  source: AudioBufferSourceNode | null;
+  busyUntil: number;
+}
+
+interface ToneVoice {
+  readonly env: GainNode;
+  source: OscillatorNode | null;
+  busyUntil: number;
+}
+
+/**
+ * Pool de voix par sortie : filtres et enveloppes créés une fois et réutilisés ; seules les sources
+ * (à usage unique dans Web Audio) sont recréées. Le nombre de voix simultanées est borné : quand tout
+ * est pris, la voix la plus ancienne est coupée et reprise (une chute en enchaîne des dizaines).
+ */
+class VoicePool {
+  readonly noise: NoiseVoice[] = [];
+  readonly tones: ToneVoice[] = [];
+
+  constructor(ctx: AudioContext, out: AudioNode) {
+    for (let i = 0; i < AUDIO.noiseVoices; i++) {
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      const env = ctx.createGain();
+      env.gain.value = 0;
+      filter.connect(env).connect(out);
+      this.noise.push({ filter, env, source: null, busyUntil: 0 });
+    }
+    for (let i = 0; i < AUDIO.toneVoices; i++) {
+      const env = ctx.createGain();
+      env.gain.value = 0;
+      env.connect(out);
+      this.tones.push({ env, source: null, busyUntil: 0 });
+    }
+  }
+}
+
+const pools = new WeakMap<AudioNode, VoicePool>();
+
+function poolFor(ctx: AudioContext, out: AudioNode): VoicePool {
+  let p = pools.get(out);
+  if (!p) pools.set(out, (p = new VoicePool(ctx, out)));
+  return p;
+}
+
+/** Voix libre, ou la plus ancienne (coupée). */
+function take<T extends { busyUntil: number }>(voices: readonly T[], t: number): T {
+  let best = voices[0]!;
+  for (const v of voices) {
+    if (v.busyUntil <= t) return v;
+    if (v.busyUntil < best.busyUntil) best = v;
+  }
+  return best;
+}
+
+function stop(source: AudioScheduledSourceNode | null, t: number): void {
+  if (!source) return;
+  try {
+    source.stop(t);
+  } catch {
+    // Déjà arrêtée.
+  }
+}
+
 /** Bouffée de bruit filtrée, enveloppe exponentielle. */
 function noiseHit(ctx: AudioContext, out: AudioNode, t: number, freq: number, q: number, gain: number, decay: number): void {
+  const v = take(poolFor(ctx, out).noise, t);
+  stop(v.source, t);
   const src = ctx.createBufferSource();
   src.buffer = noise(ctx);
-  const filter = ctx.createBiquadFilter();
-  filter.type = 'bandpass';
-  filter.frequency.value = freq;
-  filter.Q.value = q;
-  const env = ctx.createGain();
-  env.gain.setValueAtTime(gain, t);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + decay);
-  src.connect(filter).connect(env).connect(out);
+  src.connect(v.filter);
+  src.onended = () => src.disconnect();
+  v.filter.frequency.setValueAtTime(freq, t);
+  v.filter.Q.setValueAtTime(q, t);
+  const g = v.env.gain;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(gain, t);
+  g.exponentialRampToValueAtTime(0.0001, t + decay);
+  g.setValueAtTime(0, t + decay + 0.01);
   src.start(t, Math.random() * 0.5);
   src.stop(t + decay + 0.02);
+  v.source = src;
+  v.busyUntil = t + decay + 0.02;
 }
 
 /** Note brève dont la hauteur tombe : le « tock » du bois ou le choc sourd des roues. */
 function tone(ctx: AudioContext, out: AudioNode, t: number, type: OscillatorType, from: number, to: number, gain: number, decay: number): void {
+  const v = take(poolFor(ctx, out).tones, t);
+  stop(v.source, t);
   const osc = ctx.createOscillator();
   osc.type = type;
   osc.frequency.setValueAtTime(from, t);
   osc.frequency.exponentialRampToValueAtTime(to, t + decay);
-  const env = ctx.createGain();
-  env.gain.setValueAtTime(0.0001, t);
-  env.gain.exponentialRampToValueAtTime(gain, t + 0.003);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + decay);
-  osc.connect(env).connect(out);
+  osc.connect(v.env);
+  osc.onended = () => osc.disconnect();
+  const g = v.env.gain;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(0.0001, t);
+  g.exponentialRampToValueAtTime(gain, t + 0.003);
+  g.exponentialRampToValueAtTime(0.0001, t + decay);
+  g.setValueAtTime(0, t + decay + 0.01);
   osc.start(t);
   osc.stop(t + decay + 0.02);
+  v.source = osc;
+  v.busyUntil = t + decay + 0.02;
 }
 
 /** Pop : claquement sec du tail sur le sol. `strength` de 0 à 1 (charge). */

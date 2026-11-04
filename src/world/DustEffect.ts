@@ -41,6 +41,8 @@ export class DustEffect {
   private readonly material: THREE.ShaderMaterial;
   private readonly rand = seededRandom(99);
   private cursor = 0;
+  /** Densité (qualité graphique) : multiplie le nombre de particules émises. */
+  private density = 1;
   private alive = 0;
   private readonly tangent = new THREE.Vector3();
   private readonly bitangent = new THREE.Vector3();
@@ -74,8 +76,13 @@ export class DustEffect {
   }
 
   /** Émet une bouffée de `count` particules au point donné, à plat sur la surface de normale `normal`. */
+  /** Densité des particules (0 à 1), selon la qualité graphique. Le pool reste le même. */
+  setDensity(density: number): void {
+    this.density = Math.max(0, Math.min(1, density));
+  }
+
   burst(position: THREE.Vector3, normal: THREE.Vector3, count: number, speedScale = 1): void {
-    const total = Math.min(FX.dustMaxBurst, Math.round(count));
+    const total = Math.min(FX.dustMaxBurst, Math.round(count * this.density));
     this.tangent.set(1, 0, 0);
     if (Math.abs(normal.x) > 0.9) this.tangent.set(0, 0, 1);
     this.tangent.addScaledVector(normal, -this.tangent.dot(normal)).normalize();
